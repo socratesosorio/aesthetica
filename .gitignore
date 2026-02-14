@@ -1,0 +1,29 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.venv/
+.env
+
+# Node
+node_modules/
+apps/dashboard-web/dist/
+
+# Flutter
+.dart_tool/
+.packages
+.pub/
+build/
+
+# Data artifacts
+data/uploads/*
+!data/uploads/.gitkeep
+data/faiss/*
+!data/faiss/.gitkeep
+
+# Logs
+*.log

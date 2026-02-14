@@ -1,0 +1,5 @@
+celery==5.4.0
+redis==5.0.8
+sqlalchemy==2.0.34
+psycopg[binary]==3.2.1
+python-dotenv==1.0.1

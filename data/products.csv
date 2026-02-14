@@ -1,0 +1,16 @@
+product_id,title,brand,category,price,currency,image_url,local_image_path,product_url
+p_top_1,Black Tailored Tee,Linea,top,58,USD,https://picsum.photos/seed/p_top_1/400/500,,https://example.com/products/p_top_1
+p_top_2,White Rib Tank,Linea,top,34,USD,https://picsum.photos/seed/p_top_2/400/500,,https://example.com/products/p_top_2
+p_top_3,Silk Shirt,Atelier K,top,120,USD,https://picsum.photos/seed/p_top_3/400/500,,https://example.com/products/p_top_3
+p_bottom_1,Wool Trousers,Atelier K,bottom,140,USD,https://picsum.photos/seed/p_bottom_1/400/500,,https://example.com/products/p_bottom_1
+p_bottom_2,Relaxed Denim,Northline,bottom,68,USD,https://picsum.photos/seed/p_bottom_2/400/500,,https://example.com/products/p_bottom_2
+p_bottom_3,Pleated Skirt,Linea,bottom,92,USD,https://picsum.photos/seed/p_bottom_3/400/500,,https://example.com/products/p_bottom_3
+p_outer_1,Cropped Jacket,Forma,outerwear,180,USD,https://picsum.photos/seed/p_outer_1/400/500,,https://example.com/products/p_outer_1
+p_outer_2,Classic Trench,Forma,outerwear,260,USD,https://picsum.photos/seed/p_outer_2/400/500,,https://example.com/products/p_outer_2
+p_outer_3,Knit Cardigan,Northline,outerwear,88,USD,https://picsum.photos/seed/p_outer_3/400/500,,https://example.com/products/p_outer_3
+p_shoes_1,Leather Loafer,Harbor,shoes,150,USD,https://picsum.photos/seed/p_shoes_1/400/500,,https://example.com/products/p_shoes_1
+p_shoes_2,Minimal Sneaker,Harbor,shoes,98,USD,https://picsum.photos/seed/p_shoes_2/400/500,,https://example.com/products/p_shoes_2
+p_shoes_3,Heeled Boot,Forma,shoes,220,USD,https://picsum.photos/seed/p_shoes_3/400/500,,https://example.com/products/p_shoes_3
+p_acc_1,Structured Tote,Linea,accessories,160,USD,https://picsum.photos/seed/p_acc_1/400/500,,https://example.com/products/p_acc_1
+p_acc_2,Layered Necklace,Atelier K,accessories,75,USD,https://picsum.photos/seed/p_acc_2/400/500,,https://example.com/products/p_acc_2
+p_acc_3,Wide Belt,Northline,accessories,48,USD,https://picsum.photos/seed/p_acc_3/400/500,,https://example.com/products/p_acc_3

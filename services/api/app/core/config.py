@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    app_env: str = "development"
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+
+    database_url: str = "postgresql+psycopg://postgres:postgres@postgres:5432/aesthetica"
+    redis_url: str = "redis://redis:6379/0"
+
+    secret_key: str = "change-me"
+    access_token_expire_minutes: int = 1440
+
+    default_top_k: int = 30
+    base_dashboard_url: str = "http://localhost:5173"
+
+    poke_api_key: str = ""
+    poke_webhook_url: str = "https://poke.com/api/v1/inbound-sms/webhook"
+
+    dev_auth_email: str = "demo@aesthetica.dev"
+    dev_auth_password: str = "demo123"
+
+
+settings = Settings()
