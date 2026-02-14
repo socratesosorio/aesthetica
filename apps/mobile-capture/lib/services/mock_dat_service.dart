@@ -6,13 +6,20 @@ import 'package:image/image.dart' as img;
 import 'dat_service.dart';
 
 class MockDatService implements DatService {
-  final StreamController<Uint8List> _controller = StreamController.broadcast();
+  final StreamController<Uint8List> _frameController =
+      StreamController.broadcast();
+  final StreamController<Uint8List> _photoController =
+      StreamController.broadcast();
+
   Timer? _timer;
   Uint8List? _latest;
   int _tick = 0;
 
   @override
-  Stream<Uint8List> get frames => _controller.stream;
+  Stream<Uint8List> get frames => _frameController.stream;
+
+  @override
+  Stream<Uint8List> get capturedPhotos => _photoController.stream;
 
   @override
   Uint8List? get latestFrame => _latest;
@@ -53,13 +60,22 @@ class MockDatService implements DatService {
       _tick += 1;
       final jpg = Uint8List.fromList(img.encodeJpg(frame, quality: 80));
       _latest = jpg;
-      _controller.add(jpg);
+      _frameController.add(jpg);
     });
   }
 
   @override
   Future<void> stopStream() async {
     _timer?.cancel();
-    await _controller.close();
+    await _frameController.close();
+    await _photoController.close();
+  }
+
+  @override
+  Future<void> capturePhoto() async {
+    final frame = _latest;
+    if (frame != null) {
+      _photoController.add(frame);
+    }
   }
 }

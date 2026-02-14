@@ -79,6 +79,7 @@ Dev notes for DAT integration:
 - iOS bridge is now implemented in `apps/mobile-capture/ios/Runner/AppDelegate.swift` with:
   - DAT provider path (`MWDATCore` + `MWDATCamera`, when SPM dependency is installed)
   - AVFoundation fallback stream path (phone camera)
+- Hardware camera-button capture is wired through DAT `photoDataPublisher` to auto-upload flow.
 - Capture trigger supports in-app button; extendable for physical button callbacks and volume-button shortcut.
 
 ## Product Catalog + Indexing

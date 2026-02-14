@@ -22,11 +22,13 @@ class _CaptureScreenState extends State<CaptureScreen> {
   late final DatService _dat;
   final _pre = CapturePreprocessor();
 
-  StreamSubscription<Uint8List>? _sub;
+  StreamSubscription<Uint8List>? _frameSub;
+  StreamSubscription<Uint8List>? _photoSub;
   Uint8List? _frame;
 
   CaptureState _state = CaptureState.idle;
   String _status = 'Ready';
+  bool _uploadInFlight = false;
 
   // In production, this token comes from login/session flow.
   static const String _apiBaseUrlOverride =
@@ -60,17 +62,26 @@ class _CaptureScreenState extends State<CaptureScreen> {
       setState(() {
         _status = 'Initializing DAT...';
       });
+
       await _dat.initialize();
       await _dat.requestCameraPermission();
       await _dat.startStream(width: 1280, height: 720, fps: 24);
 
-      _sub = _dat.frames.listen((bytes) {
+      _frameSub = _dat.frames.listen((bytes) {
         setState(() {
           _frame = bytes;
-          if (_state == CaptureState.idle) {
+          if (_state == CaptureState.idle && !_uploadInFlight) {
             _status = 'Connected';
           }
         });
+      });
+
+      _photoSub = _dat.capturedPhotos.listen((photoBytes) {
+        _handleCapturedPhoto(photoBytes, source: 'glasses');
+      });
+
+      setState(() {
+        _status = 'Connected (hardware button ready)';
       });
     } catch (e) {
       setState(() {
@@ -80,56 +91,93 @@ class _CaptureScreenState extends State<CaptureScreen> {
     }
   }
 
-  Future<void> _captureAndUpload() async {
-    final frame = _dat.latestFrame;
-    if (frame == null) {
-      setState(() {
-        _state = CaptureState.error;
-        _status = 'No frame available yet';
-      });
+  Future<void> _handleCapturedPhoto(Uint8List photoBytes,
+      {required String source}) async {
+    if (_uploadInFlight) {
       return;
     }
 
-    setState(() {
-      _state = CaptureState.capturing;
-      _status = 'Capturing...';
-    });
+    _uploadInFlight = true;
+    if (mounted) {
+      setState(() {
+        _state = CaptureState.capturing;
+        _status = 'Captured from $source';
+      });
+    }
 
     try {
-      final processed = await _pre.preprocess(frame);
-      setState(() {
-        _state = CaptureState.captured;
-        _status = 'Captured';
-      });
+      final processed = await _pre.preprocess(photoBytes);
+      if (mounted) {
+        setState(() {
+          _state = CaptureState.captured;
+          _status = 'Processed';
+        });
+      }
 
-      setState(() {
-        _state = CaptureState.sending;
-        _status = 'Sending...';
-      });
+      if (mounted) {
+        setState(() {
+          _state = CaptureState.sending;
+          _status = 'Sending...';
+        });
+      }
 
       final captureId = await _api.uploadCapture(processed);
-      setState(() {
-        _state = CaptureState.sent;
-        _status = 'Sent: $captureId';
-      });
+      if (mounted) {
+        setState(() {
+          _state = CaptureState.sent;
+          _status = 'Sent: $captureId';
+        });
+      }
 
       await Future<void>.delayed(const Duration(milliseconds: 900));
       if (!mounted) return;
       setState(() {
         _state = CaptureState.idle;
-        _status = 'Connected';
+        _status = 'Connected (hardware button ready)';
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _state = CaptureState.error;
         _status = 'Capture failed: $e';
       });
+    } finally {
+      _uploadInFlight = false;
+    }
+  }
+
+  Future<void> _triggerCapture() async {
+    if (_uploadInFlight) {
+      return;
+    }
+
+    try {
+      setState(() {
+        _state = CaptureState.capturing;
+        _status = 'Triggering glasses capture...';
+      });
+      await _dat.capturePhoto();
+      setState(() {
+        _status = 'Waiting for photo...';
+      });
+    } catch (_) {
+      // If provider doesn't support remote capture, fallback to current frame.
+      final frame = _dat.latestFrame;
+      if (frame == null) {
+        setState(() {
+          _state = CaptureState.error;
+          _status = 'No frame available yet';
+        });
+        return;
+      }
+      await _handleCapturedPhoto(frame, source: 'fallback');
     }
   }
 
   @override
   void dispose() {
-    _sub?.cancel();
+    _frameSub?.cancel();
+    _photoSub?.cancel();
     _dat.stopStream();
     super.dispose();
   }
@@ -182,11 +230,15 @@ class _CaptureScreenState extends State<CaptureScreen> {
                     _status,
                     style: const TextStyle(color: Color(0xFFE3DBD0)),
                   ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Press glasses camera button or tap below',
+                    style: TextStyle(color: Color(0xFFAFA79A), fontSize: 12),
+                  ),
                   const SizedBox(height: 12),
                   GestureDetector(
-                    onTap: _state == CaptureState.sending
-                        ? null
-                        : _captureAndUpload,
+                    onTap:
+                        _state == CaptureState.sending ? null : _triggerCapture,
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 220),
                       width: 88,

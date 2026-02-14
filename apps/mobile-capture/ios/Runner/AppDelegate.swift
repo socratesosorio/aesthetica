@@ -24,6 +24,7 @@ import MWDATCamera
     guard let controller = window?.rootViewController as? FlutterViewController else {
       return started
     }
+
     datBridge = DatFlutterBridge(messenger: controller.binaryMessenger)
     return started
   }
@@ -52,6 +53,7 @@ private enum DatBridgeError: Error {
   case permissionDenied
   case notInitialized
   case streamStartFailed
+  case noFrameAvailable
 
   var code: String {
     switch self {
@@ -65,6 +67,8 @@ private enum DatBridgeError: Error {
       return "not_initialized"
     case .streamStartFailed:
       return "stream_start_failed"
+    case .noFrameAvailable:
+      return "no_frame_available"
     }
   }
 
@@ -80,44 +84,76 @@ private enum DatBridgeError: Error {
       return "SDK/provider not initialized"
     case .streamStartFailed:
       return "Failed to start stream"
+    case .noFrameAvailable:
+      return "No frame available for fallback photo capture"
     }
   }
 }
 
+private final class EventSinkHandler: NSObject, FlutterStreamHandler {
+  var sink: FlutterEventSink?
+
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    sink = events
+    return nil
+  }
+
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    sink = nil
+    return nil
+  }
+}
+
 private protocol DatFrameProvider: AnyObject {
-  var onFrame: ((Data) -> Void)? { get set }
+  var onPreviewFrame: ((Data) -> Void)? { get set }
+  var onCapturedPhoto: ((Data) -> Void)? { get set }
 
   func initialize(completion: @escaping (Result<Void, Error>) -> Void)
   func requestCameraPermission(completion: @escaping (Result<Void, Error>) -> Void)
   func startStream(config: StreamConfig, completion: @escaping (Result<Void, Error>) -> Void)
   func stopStream(completion: @escaping (Result<Void, Error>) -> Void)
+  func capturePhoto(completion: @escaping (Result<Void, Error>) -> Void)
   func handleOpenURL(_ url: URL) -> Bool
 }
 
-private final class DatFlutterBridge: NSObject, FlutterStreamHandler {
+private final class DatFlutterBridge {
   private let methodChannel: FlutterMethodChannel
-  private let eventChannel: FlutterEventChannel
+  private let frameEventChannel: FlutterEventChannel
+  private let photoEventChannel: FlutterEventChannel
 
-  private var eventSink: FlutterEventSink?
+  private let frameSinkHandler = EventSinkHandler()
+  private let photoSinkHandler = EventSinkHandler()
+
   private var provider: DatFrameProvider
   private var initialized = false
 
   init(messenger: FlutterBinaryMessenger) {
     methodChannel = FlutterMethodChannel(name: "aesthetica/dat", binaryMessenger: messenger)
-    eventChannel = FlutterEventChannel(name: "aesthetica/dat_frames", binaryMessenger: messenger)
+    frameEventChannel = FlutterEventChannel(name: "aesthetica/dat_frames", binaryMessenger: messenger)
+    photoEventChannel = FlutterEventChannel(name: "aesthetica/dat_photo_captures", binaryMessenger: messenger)
 
     provider = DatProviderFactory.makeProvider()
-    super.init()
 
-    provider.onFrame = { [weak self] data in
-      guard let sink = self?.eventSink else {
+    provider.onPreviewFrame = { [weak self] data in
+      guard let sink = self?.frameSinkHandler.sink else {
         return
       }
       sink(FlutterStandardTypedData(bytes: data))
     }
 
-    eventChannel.setStreamHandler(self)
-    methodChannel.setMethodCallHandler(handleMethod)
+    provider.onCapturedPhoto = { [weak self] data in
+      guard let sink = self?.photoSinkHandler.sink else {
+        return
+      }
+      sink(FlutterStandardTypedData(bytes: data))
+    }
+
+    frameEventChannel.setStreamHandler(frameSinkHandler)
+    photoEventChannel.setStreamHandler(photoSinkHandler)
+
+    methodChannel.setMethodCallHandler { [weak self] call, result in
+      self?.handleMethod(call, result: result)
+    }
   }
 
   func handleOpenURL(_ url: URL) -> Bool {
@@ -164,19 +200,17 @@ private final class DatFlutterBridge: NSObject, FlutterStreamHandler {
         Self.finish(result: result, completion)
       }
 
+    case "capturePhoto":
+      provider.capturePhoto { completion in
+        Self.finish(result: result, completion)
+      }
+
     default:
       result(FlutterMethodNotImplemented)
     }
   }
 
-  static func flutterError(from error: Error) -> FlutterError {
-    if let e = error as? DatBridgeError {
-      return FlutterError(code: e.code, message: e.message, details: nil)
-    }
-    return FlutterError(code: "native_error", message: error.localizedDescription, details: nil)
-  }
-
-  static func finish(result: @escaping FlutterResult, _ completion: Result<Void, Error>) {
+  private static func finish(result: @escaping FlutterResult, _ completion: Result<Void, Error>) {
     DispatchQueue.main.async {
       switch completion {
       case .success:
@@ -187,20 +221,16 @@ private final class DatFlutterBridge: NSObject, FlutterStreamHandler {
     }
   }
 
-  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-    eventSink = events
-    return nil
-  }
-
-  func onCancel(withArguments arguments: Any?) -> FlutterError? {
-    eventSink = nil
-    return nil
+  private static func flutterError(from error: Error) -> FlutterError {
+    if let e = error as? DatBridgeError {
+      return FlutterError(code: e.code, message: e.message, details: nil)
+    }
+    return FlutterError(code: "native_error", message: error.localizedDescription, details: nil)
   }
 }
 
 private enum DatProviderFactory {
   static func makeProvider() -> DatFrameProvider {
-    // Set to true in Info.plist only when DAT SDK + app registration is configured.
     let forceFallback = (Bundle.main.object(forInfoDictionaryKey: "AESTHETICA_FORCE_PHONE_CAMERA_FALLBACK") as? Bool) ?? false
 
     if !forceFallback {
@@ -214,13 +244,15 @@ private enum DatProviderFactory {
 }
 
 private final class AVCaptureFallbackProvider: NSObject, DatFrameProvider {
-  var onFrame: ((Data) -> Void)?
+  var onPreviewFrame: ((Data) -> Void)?
+  var onCapturedPhoto: ((Data) -> Void)?
 
   private let session = AVCaptureSession()
   private let output = AVCaptureVideoDataOutput()
   private let queue = DispatchQueue(label: "aesthetica.camera.frames")
   private let ciContext = CIContext(options: nil)
   private var isConfigured = false
+  private var latestFrameData: Data?
 
   func initialize(completion: @escaping (Result<Void, Error>) -> Void) {
     completion(.success(()))
@@ -267,6 +299,22 @@ private final class AVCaptureFallbackProvider: NSObject, DatFrameProvider {
       if self.session.isRunning {
         self.session.stopRunning()
       }
+      completion(.success(()))
+    }
+  }
+
+  func capturePhoto(completion: @escaping (Result<Void, Error>) -> Void) {
+    queue.async { [weak self] in
+      guard let self else {
+        completion(.failure(DatBridgeError.noFrameAvailable))
+        return
+      }
+      guard let frame = self.latestFrameData else {
+        completion(.failure(DatBridgeError.noFrameAvailable))
+        return
+      }
+
+      self.onCapturedPhoto?(frame)
       completion(.success(()))
     }
   }
@@ -339,21 +387,25 @@ extension AVCaptureFallbackProvider: AVCaptureVideoDataOutputSampleBufferDelegat
       return
     }
 
-    onFrame?(jpeg)
+    latestFrameData = jpeg
+    onPreviewFrame?(jpeg)
   }
 }
 
 #if canImport(MWDATCore) && canImport(MWDATCamera)
 private final class MetaDatProvider: DatFrameProvider {
-  var onFrame: ((Data) -> Void)?
+  var onPreviewFrame: ((Data) -> Void)?
+  var onCapturedPhoto: ((Data) -> Void)?
 
+  private let wearables: WearablesInterface = Wearables.shared
   private var streamSession: StreamSession?
-  private var stateListenerToken: Any?
-  private var frameListenerToken: Any?
-  private var errorListenerToken: Any?
+
+  private var stateListenerToken: AnyListenerToken?
+  private var videoFrameListenerToken: AnyListenerToken?
+  private var errorListenerToken: AnyListenerToken?
+  private var photoDataListenerToken: AnyListenerToken?
 
   private var configured = false
-  private let wearables = Wearables.shared
 
   func initialize(completion: @escaping (Result<Void, Error>) -> Void) {
     do {
@@ -370,10 +422,12 @@ private final class MetaDatProvider: DatFrameProvider {
   func requestCameraPermission(completion: @escaping (Result<Void, Error>) -> Void) {
     Task {
       do {
-        var status = try await wearables.checkPermissionStatus(.camera)
+        let permission = Permission.camera
+        var status = try await wearables.checkPermissionStatus(permission)
         if status != .granted {
-          status = try await wearables.requestPermission(.camera)
+          status = try await wearables.requestPermission(permission)
         }
+
         if status == .granted {
           completion(.success(()))
         } else {
@@ -398,7 +452,7 @@ private final class MetaDatProvider: DatFrameProvider {
 
     let safeFps = UInt(max(15, min(config.fps, 30)))
     let sessionConfig = StreamSessionConfig(
-      videoCodec: .raw,
+      videoCodec: VideoCodec.raw,
       resolution: resolution,
       frameRate: safeFps
     )
@@ -406,16 +460,20 @@ private final class MetaDatProvider: DatFrameProvider {
     let selector = AutoDeviceSelector(wearables: wearables)
     let session = StreamSession(streamSessionConfig: sessionConfig, deviceSelector: selector)
 
-    // Keep refs to listener tokens to maintain subscriptions.
     stateListenerToken = session.statePublisher.listen { _ in }
-    frameListenerToken = session.videoFramePublisher.listen { [weak self] frame in
+
+    videoFrameListenerToken = session.videoFramePublisher.listen { [weak self] frame in
       guard let image = frame.makeUIImage() else {
         return
       }
       guard let data = image.jpegData(compressionQuality: 0.72) else {
         return
       }
-      self?.onFrame?(data)
+      self?.onPreviewFrame?(data)
+    }
+
+    photoDataListenerToken = session.photoDataPublisher.listen { [weak self] photoData in
+      self?.onCapturedPhoto?(photoData.data)
     }
 
     errorListenerToken = session.errorPublisher.listen { error in
@@ -423,16 +481,36 @@ private final class MetaDatProvider: DatFrameProvider {
     }
 
     streamSession = session
-    session.start()
-    completion(.success(()))
+
+    Task {
+      await session.start()
+      completion(.success(()))
+    }
   }
 
   func stopStream(completion: @escaping (Result<Void, Error>) -> Void) {
-    streamSession?.stop()
-    streamSession = nil
-    stateListenerToken = nil
-    frameListenerToken = nil
-    errorListenerToken = nil
+    guard let session = streamSession else {
+      completion(.success(()))
+      return
+    }
+
+    Task {
+      await session.stop()
+      streamSession = nil
+      stateListenerToken = nil
+      videoFrameListenerToken = nil
+      photoDataListenerToken = nil
+      errorListenerToken = nil
+      completion(.success(()))
+    }
+  }
+
+  func capturePhoto(completion: @escaping (Result<Void, Error>) -> Void) {
+    guard let session = streamSession else {
+      completion(.failure(DatBridgeError.notInitialized))
+      return
+    }
+    session.capturePhoto(format: .jpeg)
     completion(.success(()))
   }
 
@@ -441,8 +519,8 @@ private final class MetaDatProvider: DatFrameProvider {
       return false
     }
 
-    let hasMetaAction = components.queryItems?.contains(where: { $0.name == "metaWearablesAction" }) == true
-    guard hasMetaAction else {
+    let isDatCallback = components.queryItems?.contains(where: { $0.name == "metaWearablesAction" }) == true
+    guard isDatCallback else {
       return false
     }
 
@@ -453,6 +531,7 @@ private final class MetaDatProvider: DatFrameProvider {
         NSLog("[Aesthetica][DAT] handleUrl failed: \(error)")
       }
     }
+
     return true
   }
 }

@@ -4,28 +4,43 @@ import 'package:flutter/services.dart';
 
 /// Abstraction for Meta Wearables DAT camera stream.
 ///
-/// Current MVP trigger is in-app capture button. This interface is designed to
-/// extend with physical button callback and volume-button shortcut later.
+/// Supports both preview frames and photo capture events.
+/// On real DAT integrations, `capturedPhotos` receives photos captured from
+/// either in-app `capturePhoto()` calls or glasses hardware camera button events.
 abstract class DatService {
   Stream<Uint8List> get frames;
+  Stream<Uint8List> get capturedPhotos;
   Uint8List? get latestFrame;
 
   Future<void> initialize();
   Future<void> requestCameraPermission();
   Future<void> startStream({int width = 1280, int height = 720, int fps = 30});
   Future<void> stopStream();
+  Future<void> capturePhoto();
 }
 
 class RealDatService implements DatService {
   static const MethodChannel _method = MethodChannel('aesthetica/dat');
-  static const EventChannel _events = EventChannel('aesthetica/dat_frames');
+  static const EventChannel _frameEvents =
+      EventChannel('aesthetica/dat_frames');
+  static const EventChannel _photoEvents =
+      EventChannel('aesthetica/dat_photo_captures');
 
-  final StreamController<Uint8List> _controller = StreamController.broadcast();
-  StreamSubscription<dynamic>? _subscription;
+  final StreamController<Uint8List> _frameController =
+      StreamController.broadcast();
+  final StreamController<Uint8List> _photoController =
+      StreamController.broadcast();
+
+  StreamSubscription<dynamic>? _frameSubscription;
+  StreamSubscription<dynamic>? _photoSubscription;
+
   Uint8List? _latest;
 
   @override
-  Stream<Uint8List> get frames => _controller.stream;
+  Stream<Uint8List> get frames => _frameController.stream;
+
+  @override
+  Stream<Uint8List> get capturedPhotos => _photoController.stream;
 
   @override
   Uint8List? get latestFrame => _latest;
@@ -33,15 +48,18 @@ class RealDatService implements DatService {
   @override
   Future<void> initialize() async {
     await _method.invokeMethod('initializeSdk');
-    _subscription = _events.receiveBroadcastStream().listen((event) {
-      if (event is Uint8List) {
-        _latest = event;
-        _controller.add(event);
-      } else if (event is List<int>) {
-        final bytes = Uint8List.fromList(event);
-        _latest = bytes;
-        _controller.add(bytes);
-      }
+
+    _frameSubscription = _frameEvents.receiveBroadcastStream().listen((event) {
+      final bytes = _asBytes(event);
+      if (bytes == null) return;
+      _latest = bytes;
+      _frameController.add(bytes);
+    });
+
+    _photoSubscription = _photoEvents.receiveBroadcastStream().listen((event) {
+      final bytes = _asBytes(event);
+      if (bytes == null) return;
+      _photoController.add(bytes);
     });
   }
 
@@ -63,7 +81,20 @@ class RealDatService implements DatService {
   @override
   Future<void> stopStream() async {
     await _method.invokeMethod('stopVideoStream');
-    await _subscription?.cancel();
-    await _controller.close();
+    await _frameSubscription?.cancel();
+    await _photoSubscription?.cancel();
+    await _frameController.close();
+    await _photoController.close();
+  }
+
+  @override
+  Future<void> capturePhoto() async {
+    await _method.invokeMethod('capturePhoto');
+  }
+
+  Uint8List? _asBytes(dynamic event) {
+    if (event is Uint8List) return event;
+    if (event is List<int>) return Uint8List.fromList(event);
+    return null;
   }
 }
