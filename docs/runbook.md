@@ -24,6 +24,7 @@
   - run `make embed-products` and check `data/faiss` files.
 - No Poke messages:
   - set `POKE_API_KEY` in `.env`.
+  - ensure `POKE_WEBHOOK_URL=https://poke.com/api/v1/inbound/api-message`.
 - No open-web matches:
   - set `SERPAPI_API_KEY` in `.env`.
   - verify `WEB_SEARCH_ENABLED=true`.

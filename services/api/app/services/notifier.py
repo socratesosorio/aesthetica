@@ -14,8 +14,7 @@ class PokeNotifier:
         if not settings.poke_api_key:
             logger.warning("poke_key_missing_skip_send")
             return
-
-        headers = {"Authorization": f"Bearer {settings.poke_api_key}"}
+        headers = {"Authorization": f"Bearer {settings.poke_api_key}", "Content-Type": "application/json"}
         payload = {"message": message[:800]}
         try:
             resp = httpx.post(settings.poke_webhook_url, headers=headers, json=payload, timeout=10)
