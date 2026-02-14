@@ -2,6 +2,8 @@
 
 Spatial fashion capture and taste intelligence MVP for Meta Ray-Ban smart glasses.
 
+Detailed setup: `docs/setup.md`
+
 ## Monorepo Layout
 
 - `apps/mobile-capture` Flutter companion app with DAT abstraction, frame preprocessing, upload.
