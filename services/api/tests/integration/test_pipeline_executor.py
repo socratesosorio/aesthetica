@@ -7,6 +7,7 @@ from PIL import Image
 
 from app.models import Capture, Product, User, UserProfile, UserRadarHistory
 from app.services.pipeline_executor import process_capture
+from app.services.web_product_search import WebProductCandidate
 
 
 @dataclass
@@ -74,6 +75,23 @@ class _MockNotifier:
 class _FailingNotifier:
     def send(self, message: str) -> None:
         raise RuntimeError("notification transient failure")
+
+
+class _MockWebSearcher:
+    def search(self, category: str, attributes: dict | None = None, image_url: str | None = None, limit: int = 5):
+        return [
+            WebProductCandidate(
+                provider="serpapi_google_shopping",
+                title="Online Black Tee",
+                brand="ShopX",
+                category=category,
+                product_url="https://shopx.example/products/black-tee",
+                image_url="https://shopx.example/images/black-tee.jpg",
+                price=42.0,
+                currency="USD",
+                similarity=0.82,
+            )
+        ]
 
 
 def test_pipeline_executor_updates_db(monkeypatch, db_session, sample_image_path):
@@ -162,6 +180,58 @@ def test_pipeline_executor_updates_db(monkeypatch, db_session, sample_image_path
 
     assert len(notifier.messages) == 1
     assert "Top matches" in notifier.messages[0]
+
+
+def test_pipeline_executor_persists_web_matches(monkeypatch, db_session, sample_image_path):
+    user = User(email="demo-web@example.com", password_hash="hash")
+    db_session.add(user)
+    db_session.flush()
+
+    db_session.add(
+        Product(
+            id="p_top_1",
+            title="Black Tee",
+            brand="A",
+            category="top",
+            price=50,
+            currency="USD",
+            image_url="https://example.com/1.jpg",
+            product_url="https://example.com/1",
+            color_tags=None,
+        )
+    )
+
+    capture = Capture(user_id=user.id, image_path=str(sample_image_path), status="queued")
+    db_session.add(capture)
+    db_session.commit()
+
+    monkeypatch.setattr("app.services.pipeline_executor.CapturePipeline", _MockPipeline)
+    monkeypatch.setattr("app.services.pipeline_executor.get_catalog", lambda: _MockCatalog())
+    monkeypatch.setattr("app.services.pipeline_executor.get_web_product_searcher", lambda: _MockWebSearcher())
+
+    class _FakeTaste:
+        def update_embedding(self, prev, cur):
+            return cur
+
+        def radar_scores(self, emb):
+            return {
+                "minimal_maximal": 55.0,
+                "structured_relaxed": 48.0,
+                "neutral_color_forward": 52.0,
+                "classic_experimental": 49.0,
+                "casual_formal": 51.0,
+            }
+
+        def delta(self, old, new):
+            return {k: new[k] - (old or {}).get(k, 0.0) for k in new}
+
+    monkeypatch.setattr("app.services.pipeline_executor.TasteProfileEngine", lambda: _FakeTaste())
+    process_capture(db_session, capture.id, notifier=_MockNotifier())
+
+    refreshed = db_session.query(Capture).filter(Capture.id == capture.id).first()
+    assert refreshed is not None
+    assert any(m.match_group.startswith("web_") for m in refreshed.matches)
+    assert any((p.id.startswith("web_") and p.brand == "ShopX") for p in db_session.query(Product).all())
 
 
 def test_pipeline_executor_does_not_raise_on_post_commit_notifier_failure(monkeypatch, db_session, sample_image_path):

@@ -19,6 +19,11 @@ cp .env.example .env
 
 If you need to override secrets/URLs, edit `.env` before starting services.
 
+For open-web product matching (any online shop via Google Shopping API surface), set:
+
+- `SERPAPI_API_KEY=<your key>`
+- keep `WEB_SEARCH_ENABLED=true`
+
 ## 2) Start backend stack
 
 ```bash
@@ -142,3 +147,6 @@ make down
 - iPhone app cannot hit API:
   - Use Mac LAN IP, not `127.0.0.1`.
   - Ensure phone and Mac are on same network.
+- Only local catalog products appear in matches:
+  - Set `SERPAPI_API_KEY` in `.env`.
+  - Ensure outbound network access from API container.

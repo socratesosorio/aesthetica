@@ -13,12 +13,12 @@ from app.core.config import settings
 from app.core.context import capture_id_ctx
 from app.models import Capture, Garment, Match, Product, UserProfile, UserRadarHistory
 from app.services.notifier import PokeNotifier
-from ml_core.config import CONFIG
+from app.services.web_product_search import get_web_product_searcher, upsert_web_product
 from ml_core.pipeline import CapturePipeline
 from ml_core.retrieval import SearchResult, get_catalog
 from ml_core.storage import get_storage
 from ml_core.taste import TasteProfileEngine, generate_aesthetic_summary
-from ml_core.utils import b64_to_ndarray, blur_faces_safety, l2_normalize, ndarray_to_b64
+from ml_core.utils import blur_faces_safety
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,56 @@ def _merge_color_stats(old: dict, attrs: dict) -> dict:
     return {k: round(v / total, 4) for k, v in acc.items()}
 
 
+def _as_public_http_url(path: str | None) -> str | None:
+    if not path:
+        return None
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    return None
+
+
+def _add_web_matches(
+    db: Session,
+    capture_id: str,
+    garment_id: str | None,
+    category: str,
+    attributes: dict | None,
+    image_url: str | None,
+    existing_product_ids: set[str],
+) -> None:
+    if not settings.web_search_enabled:
+        return
+
+    try:
+        candidates = get_web_product_searcher().search(
+            category=category,
+            attributes=attributes or {},
+            image_url=image_url,
+            limit=settings.web_search_top_k,
+        )
+    except Exception:
+        logger.exception("web_match_search_failed")
+        return
+
+    rank = settings.default_top_k + 1
+    for idx, candidate in enumerate(candidates, start=1):
+        product = upsert_web_product(db, candidate)
+        if product.id in existing_product_ids:
+            continue
+        existing_product_ids.add(product.id)
+        db.add(
+            Match(
+                capture_id=capture_id,
+                garment_id=garment_id,
+                product_id=product.id,
+                rank=rank,
+                similarity=max(0.0, min(1.0, candidate.similarity)),
+                match_group=f"web_{idx}",
+            )
+        )
+        rank += 1
+
+
 def process_capture(db: Session, capture_id: str, notifier: PokeNotifier | None = None) -> None:
     token = capture_id_ctx.set(capture_id)
     notifier = notifier or PokeNotifier()
@@ -149,8 +199,10 @@ def process_capture(db: Session, capture_id: str, notifier: PokeNotifier | None 
                 pids = [r.product_id for r in ranked]
                 products = db.query(Product).filter(Product.id.in_(pids)).all() if pids else []
                 tiered = _pick_price_tiers(products, ranked)
+                existing_product_ids: set[str] = set()
 
                 for product, rank_meta, group in tiered:
+                    existing_product_ids.add(product.id)
                     db.add(
                         Match(
                             capture_id=capture.id,
@@ -162,12 +214,24 @@ def process_capture(db: Session, capture_id: str, notifier: PokeNotifier | None 
                         )
                     )
 
+                _add_web_matches(
+                    db=db,
+                    capture_id=capture.id,
+                    garment_id=garment.id,
+                    category=g.garment_type,
+                    attributes=g.attributes,
+                    image_url=_as_public_http_url(crop_path),
+                    existing_product_ids=existing_product_ids,
+                )
+
             if not created_garments:
                 ranked = get_catalog().query("top", result.global_embedding, top_k=settings.default_top_k)
                 pids = [r.product_id for r in ranked]
                 products = db.query(Product).filter(Product.id.in_(pids)).all() if pids else []
                 tiered = _pick_price_tiers(products, ranked)
+                existing_product_ids: set[str] = set()
                 for product, rank_meta, group in tiered:
+                    existing_product_ids.add(product.id)
                     db.add(
                         Match(
                             capture_id=capture.id,
@@ -178,6 +242,15 @@ def process_capture(db: Session, capture_id: str, notifier: PokeNotifier | None 
                             match_group=group,
                         )
                     )
+                _add_web_matches(
+                    db=db,
+                    capture_id=capture.id,
+                    garment_id=None,
+                    category="top",
+                    attributes=result.global_attributes,
+                    image_url=_as_public_http_url(capture.image_path),
+                    existing_product_ids=existing_product_ids,
+                )
 
             profile = db.query(UserProfile).filter(UserProfile.user_id == capture.user_id).first()
             if profile is None:

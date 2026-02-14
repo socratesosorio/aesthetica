@@ -10,6 +10,7 @@ class ProductSearchOut(BaseModel):
     category: str
     price: float | None
     currency: str | None
+    source: str | None = None
     product_url: str
     similarity: float
     rank: int

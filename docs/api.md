@@ -25,6 +25,8 @@ OpenAPI docs: `/docs`
 - `GET /v1/users/{user_id}/radar/history?days=...`
 - `GET /v1/products/search?embedding_b64=...&garment_type=top`
 - `GET /v1/products/search?capture_id=...&garment_type=top`
+- `GET /v1/products/search?capture_id=...&garment_type=top&include_web=true`
+  - `include_web=true` appends live web matches (SerpAPI provider) to catalog matches.
 
 ## Internal
 

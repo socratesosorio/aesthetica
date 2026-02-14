@@ -89,6 +89,7 @@ Dev notes for DAT integration:
 - Source CSV: `data/products.csv`
 - Embedding script: `services/ml/scripts/embed_products.py`
 - FAISS output: `data/faiss/*.index` and `data/faiss/*_mapping.json`
+- Open-web match fallback: SerpAPI Google Shopping (+ optional Google Lens when public image URLs are available)
 
 ## Environment Variables
 
@@ -102,6 +103,7 @@ Key ones:
 - `OPENCLIP_MODEL_NAME`
 - `OPENCLIP_PRETRAINED`
 - `POKE_API_KEY`
+- `SERPAPI_API_KEY` (for live online-shop search beyond local catalog)
 
 ## API Docs
 

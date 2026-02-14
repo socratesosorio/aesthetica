@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     poke_api_key: str = ""
     poke_webhook_url: str = "https://poke.com/api/v1/inbound-sms/webhook"
 
+    web_search_enabled: bool = True
+    web_search_provider: str = "serpapi"
+    web_search_top_k: int = 5
+    web_search_country: str = "us"
+    web_search_language: str = "en"
+    web_search_enable_lens: bool = True
+    serpapi_api_key: str = ""
+    serpapi_base_url: str = "https://serpapi.com/search.json"
+
     dev_auth_email: str = "demo@aesthetica.dev"
     dev_auth_password: str = "demo123"
 
