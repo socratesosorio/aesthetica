@@ -193,7 +193,7 @@ For each capture:
 
 POKE INTEGRATION REQUIREMENTS
 - Implement a notifier module that can send a message via Poke using:
-  POST https://poke.com/api/v1/inbound-sms/webhook
+  POST https://poke.com/api/v1/inbound/api-message
   Header: Authorization: Bearer ${POKE_API_KEY}
   Body: {"message": "..."}
 - If POKE_API_KEY is missing, log warning and skip send (do not fail pipeline).

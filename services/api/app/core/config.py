@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     base_dashboard_url: str = "http://localhost:5173"
 
     poke_api_key: str = ""
-    poke_webhook_url: str = "https://poke.com/api/v1/inbound-sms/webhook"
+    poke_webhook_url: str = "https://poke.com/api/v1/inbound/api-message"
 
     web_search_enabled: bool = True
     web_search_provider: str = "serpapi"
