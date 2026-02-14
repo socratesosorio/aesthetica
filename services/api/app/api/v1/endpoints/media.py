@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -11,6 +12,13 @@ from app.core.security import decode_access_token
 from app.models import User
 
 router = APIRouter()
+
+
+def _is_within_root(path: Path, root: Path) -> bool:
+    try:
+        return path.is_relative_to(root)
+    except AttributeError:
+        return path == root or root in path.parents
 
 
 @router.get("/media")
@@ -39,8 +47,11 @@ def get_media(
 
     del user
     p = Path(path).resolve()
-    allowed_roots = [Path("/app/data/uploads").resolve(), Path("data/uploads").resolve()]
-    if not any(str(p).startswith(str(root)) for root in allowed_roots):
+    allowed_roots = [
+        Path(os.getenv("LOCAL_STORAGE_ROOT", "/app/data/uploads")).resolve(),
+        Path("data/uploads").resolve(),
+    ]
+    if not any(_is_within_root(p, root) for root in allowed_roots):
         raise HTTPException(status_code=403, detail="Forbidden path")
     if not p.exists():
         raise HTTPException(status_code=404, detail="File not found")

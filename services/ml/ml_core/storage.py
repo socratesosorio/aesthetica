@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .utils import ensure_dir
 
@@ -32,6 +33,16 @@ class LocalStorage(StorageBackend):
         return str(path)
 
     def read_bytes(self, key: str) -> bytes:
+        p = Path(key)
+        if p.is_absolute():
+            return p.read_bytes()
+
+        root = Path(self.root)
+        # `put_bytes` can persist keys that already include the configured root
+        # (for example "data/uploads/..."). Avoid prefixing root twice.
+        if root.parts and p.parts[: len(root.parts)] == root.parts:
+            return p.read_bytes()
+
         return Path(self.root, key).read_bytes()
 
     def resolve(self, key: str) -> str:
@@ -64,7 +75,14 @@ class S3Storage(StorageBackend):
         return f"s3://{self.bucket}/{key}"
 
     def read_bytes(self, key: str) -> bytes:
-        body = self._client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        bucket = self.bucket
+        object_key = key
+        if key.startswith("s3://"):
+            parsed = urlparse(key)
+            if parsed.netloc and parsed.path:
+                bucket = parsed.netloc
+                object_key = parsed.path.lstrip("/")
+        body = self._client.get_object(Bucket=bucket, Key=object_key)["Body"].read()
         return bytes(body)
 
     def resolve(self, key: str) -> str:

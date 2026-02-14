@@ -98,151 +98,176 @@ def _merge_color_stats(old: dict, attrs: dict) -> dict:
 def process_capture(db: Session, capture_id: str, notifier: PokeNotifier | None = None) -> None:
     token = capture_id_ctx.set(capture_id)
     notifier = notifier or PokeNotifier()
+    notification_payload: tuple[dict, dict[str, float], dict[str, float]] | None = None
 
     try:
-        capture = db.query(Capture).filter(Capture.id == capture_id).first()
-        if capture is None:
-            logger.error("capture_not_found")
-            return
+        try:
+            capture = db.query(Capture).filter(Capture.id == capture_id).first()
+            if capture is None:
+                logger.error("capture_not_found")
+                return
 
-        capture.status = "processing"
-        db.commit()
+            if capture.status == "done":
+                logger.info("capture_already_processed")
+                return
 
-        image = Image.open(capture.image_path).convert("RGB")
-        image = blur_faces_safety(image)
-
-        pipeline = CapturePipeline(catalog=get_catalog())
-        result = pipeline.run(image)
-
-        capture.global_embedding = _vec_to_bytes(result.global_embedding)
-        capture.global_attributes_json = result.global_attributes
-
-        storage = get_storage()
-        created_garments: list[Garment] = []
-
-        for g in result.garments:
-            buf = BytesIO()
-            g.crop.save(buf, format="PNG")
-            crop_key = f"garments/{capture.user_id}/{capture.id}/{g.garment_type}_{uuid.uuid4().hex[:8]}.png"
-            crop_path = storage.put_bytes(crop_key, buf.getvalue(), content_type="image/png")
-
-            garment = Garment(
-                capture_id=capture.id,
-                garment_type=g.garment_type,
-                crop_path=crop_path,
-                embedding_vector=_vec_to_bytes(g.embedding),
-                attributes_json=g.attributes,
-            )
-            db.add(garment)
-            db.flush()
-            created_garments.append(garment)
-
-            ranked = get_catalog().query(g.garment_type, g.embedding, top_k=settings.default_top_k)
-            pids = [r.product_id for r in ranked]
-            products = db.query(Product).filter(Product.id.in_(pids)).all() if pids else []
-            tiered = _pick_price_tiers(products, ranked)
-
-            for product, rank_meta, group in tiered:
-                db.add(
-                    Match(
-                        capture_id=capture.id,
-                        garment_id=garment.id,
-                        product_id=product.id,
-                        rank=rank_meta.rank,
-                        similarity=rank_meta.similarity,
-                        match_group=group,
-                    )
-                )
-
-        if not created_garments:
-            ranked = get_catalog().query("top", result.global_embedding, top_k=settings.default_top_k)
-            pids = [r.product_id for r in ranked]
-            products = db.query(Product).filter(Product.id.in_(pids)).all() if pids else []
-            tiered = _pick_price_tiers(products, ranked)
-            for product, rank_meta, group in tiered:
-                db.add(
-                    Match(
-                        capture_id=capture.id,
-                        garment_id=None,
-                        product_id=product.id,
-                        rank=rank_meta.rank,
-                        similarity=rank_meta.similarity,
-                        match_group=group,
-                    )
-                )
-
-        profile = db.query(UserProfile).filter(UserProfile.user_id == capture.user_id).first()
-        if profile is None:
-            profile = UserProfile(user_id=capture.user_id, radar_vector_json={}, brand_stats={}, color_stats={}, category_bias={})
-            db.add(profile)
-            db.flush()
-
-        taste = TasteProfileEngine()
-        prev_embedding = _bytes_to_vec(profile.embedding_vector)
-        prev_radar = profile.radar_vector_json or {}
-
-        updated_embedding = taste.update_embedding(prev_embedding, result.global_embedding)
-        updated_radar = taste.radar_scores(updated_embedding)
-        delta = taste.delta(prev_radar, updated_radar)
-
-        profile.embedding_vector = _vec_to_bytes(updated_embedding)
-        profile.radar_vector_json = updated_radar
-
-        brand_counts = Counter(profile.brand_stats or {})
-        for m in db.query(Match).filter(Match.capture_id == capture.id).all():
-            product = db.query(Product).filter(Product.id == m.product_id).first()
-            if product:
-                brand_counts[product.brand] += 1
-        profile.brand_stats = dict(brand_counts)
-
-        color_stats = profile.color_stats or {}
-        for g in created_garments:
-            color_stats = _merge_color_stats(color_stats, g.attributes_json)
-        profile.color_stats = color_stats
-
-        cat_counts = Counter(profile.category_bias or {})
-        for g in created_garments:
-            cat_counts[g.garment_type] += 1
-        profile.category_bias = dict(cat_counts)
-
-        db.add(
-            UserRadarHistory(
-                user_id=capture.user_id,
-                radar_vector_json=updated_radar,
-            )
-        )
-
-        capture.status = "done"
-        capture.error = None
-        db.commit()
-
-        top_matches = (
-            db.query(Match, Product)
-            .join(Product, Product.id == Match.product_id)
-            .filter(Match.capture_id == capture.id)
-            .order_by(Match.rank.asc())
-            .limit(5)
-            .all()
-        )
-
-        summary = generate_aesthetic_summary(result.global_attributes, updated_radar)
-        delta_line = _format_delta(delta)
-        links = [f"{p.title} {p.product_url}" for _, p in top_matches]
-
-        message = (
-            f"{summary}\n"
-            f"Radar delta: {delta_line}\n"
-            f"Top matches: {' | '.join(links)}\n"
-            f"View: {settings.base_dashboard_url}/looks/{capture.id}"
-        )
-        notifier.send(message)
-    except Exception as exc:
-        logger.exception("capture_processing_failed")
-        db.rollback()
-        cap = db.query(Capture).filter(Capture.id == capture_id).first()
-        if cap:
-            cap.status = "failed"
-            cap.error = str(exc)
+            capture.status = "processing"
+            capture.error = None
             db.commit()
+
+            storage = get_storage()
+            image_bytes = storage.read_bytes(capture.image_path)
+            image = Image.open(BytesIO(image_bytes)).convert("RGB")
+            image = blur_faces_safety(image)
+
+            pipeline = CapturePipeline(catalog=get_catalog())
+            result = pipeline.run(image)
+
+            capture.global_embedding = _vec_to_bytes(result.global_embedding)
+            capture.global_attributes_json = result.global_attributes
+
+            created_garments: list[Garment] = []
+
+            for g in result.garments:
+                buf = BytesIO()
+                g.crop.save(buf, format="PNG")
+                crop_key = f"garments/{capture.user_id}/{capture.id}/{g.garment_type}_{uuid.uuid4().hex[:8]}.png"
+                crop_path = storage.put_bytes(crop_key, buf.getvalue(), content_type="image/png")
+
+                garment = Garment(
+                    capture_id=capture.id,
+                    garment_type=g.garment_type,
+                    crop_path=crop_path,
+                    embedding_vector=_vec_to_bytes(g.embedding),
+                    attributes_json=g.attributes,
+                )
+                db.add(garment)
+                db.flush()
+                created_garments.append(garment)
+
+                ranked = get_catalog().query(g.garment_type, g.embedding, top_k=settings.default_top_k)
+                pids = [r.product_id for r in ranked]
+                products = db.query(Product).filter(Product.id.in_(pids)).all() if pids else []
+                tiered = _pick_price_tiers(products, ranked)
+
+                for product, rank_meta, group in tiered:
+                    db.add(
+                        Match(
+                            capture_id=capture.id,
+                            garment_id=garment.id,
+                            product_id=product.id,
+                            rank=rank_meta.rank,
+                            similarity=rank_meta.similarity,
+                            match_group=group,
+                        )
+                    )
+
+            if not created_garments:
+                ranked = get_catalog().query("top", result.global_embedding, top_k=settings.default_top_k)
+                pids = [r.product_id for r in ranked]
+                products = db.query(Product).filter(Product.id.in_(pids)).all() if pids else []
+                tiered = _pick_price_tiers(products, ranked)
+                for product, rank_meta, group in tiered:
+                    db.add(
+                        Match(
+                            capture_id=capture.id,
+                            garment_id=None,
+                            product_id=product.id,
+                            rank=rank_meta.rank,
+                            similarity=rank_meta.similarity,
+                            match_group=group,
+                        )
+                    )
+
+            profile = db.query(UserProfile).filter(UserProfile.user_id == capture.user_id).first()
+            if profile is None:
+                profile = UserProfile(
+                    user_id=capture.user_id,
+                    radar_vector_json={},
+                    brand_stats={},
+                    color_stats={},
+                    category_bias={},
+                )
+                db.add(profile)
+                db.flush()
+
+            taste = TasteProfileEngine()
+            prev_embedding = _bytes_to_vec(profile.embedding_vector)
+            prev_radar = profile.radar_vector_json or {}
+
+            updated_embedding = taste.update_embedding(prev_embedding, result.global_embedding)
+            updated_radar = taste.radar_scores(updated_embedding)
+            delta = taste.delta(prev_radar, updated_radar)
+
+            profile.embedding_vector = _vec_to_bytes(updated_embedding)
+            profile.radar_vector_json = updated_radar
+
+            brand_counts = Counter(profile.brand_stats or {})
+            for m in db.query(Match).filter(Match.capture_id == capture.id).all():
+                product = db.query(Product).filter(Product.id == m.product_id).first()
+                if product:
+                    brand_counts[product.brand] += 1
+            profile.brand_stats = dict(brand_counts)
+
+            color_stats = profile.color_stats or {}
+            for g in created_garments:
+                color_stats = _merge_color_stats(color_stats, g.attributes_json)
+            profile.color_stats = color_stats
+
+            cat_counts = Counter(profile.category_bias or {})
+            for g in created_garments:
+                cat_counts[g.garment_type] += 1
+            profile.category_bias = dict(cat_counts)
+
+            db.add(
+                UserRadarHistory(
+                    user_id=capture.user_id,
+                    radar_vector_json=updated_radar,
+                )
+            )
+
+            capture.status = "done"
+            capture.error = None
+            db.commit()
+            notification_payload = (result.global_attributes, updated_radar, delta)
+        except Exception as exc:
+            logger.exception("capture_processing_failed")
+            db.rollback()
+            cap = db.query(Capture).filter(Capture.id == capture_id).first()
+            if cap and cap.status != "done":
+                cap.status = "failed"
+                cap.error = str(exc)
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception("capture_mark_failed_commit_error")
+            raise
+
+        if notification_payload is not None:
+            attrs, radar, delta = notification_payload
+            try:
+                top_matches = (
+                    db.query(Match, Product)
+                    .join(Product, Product.id == Match.product_id)
+                    .filter(Match.capture_id == capture_id)
+                    .order_by(Match.rank.asc())
+                    .limit(5)
+                    .all()
+                )
+
+                summary = generate_aesthetic_summary(attrs, radar)
+                delta_line = _format_delta(delta)
+                links = [f"{p.title} {p.product_url}" for _, p in top_matches]
+
+                message = (
+                    f"{summary}\n"
+                    f"Radar delta: {delta_line}\n"
+                    f"Top matches: {' | '.join(links)}\n"
+                    f"View: {settings.base_dashboard_url}/looks/{capture_id}"
+                )
+                notifier.send(message)
+            except Exception:
+                logger.exception("capture_notify_failed")
     finally:
         capture_id_ctx.reset(token)

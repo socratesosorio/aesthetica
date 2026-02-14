@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 from dotenv import load_dotenv
 
+load_dotenv()
+
 from ml_core.config import CONFIG
 from ml_core.embeddings import get_embedder
 from ml_core.retrieval import CATEGORIES, FaissCatalog
@@ -21,7 +23,6 @@ def read_products(csv_path: str) -> list[dict]:
 
 
 def main() -> None:
-    load_dotenv()
     products = read_products(CONFIG.product_csv_path)
     grouped: dict[str, list[dict]] = defaultdict(list)
 
