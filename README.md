@@ -76,7 +76,9 @@ flutter run
 
 Dev notes for DAT integration:
 - The app uses `DatService` abstraction (`MethodChannel`) so native DAT SDK integration can be plugged in on iOS/Android.
-- Current fallback uses a mock frame stream for local UI development.
+- iOS bridge is now implemented in `apps/mobile-capture/ios/Runner/AppDelegate.swift` with:
+  - DAT provider path (`MWDATCore` + `MWDATCamera`, when SPM dependency is installed)
+  - AVFoundation fallback stream path (phone camera)
 - Capture trigger supports in-app button; extendable for physical button callbacks and volume-button shortcut.
 
 ## Product Catalog + Indexing

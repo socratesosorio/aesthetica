@@ -24,7 +24,8 @@ class MockDatService implements DatService {
   Future<void> requestCameraPermission() async {}
 
   @override
-  Future<void> startStream({int width = 1280, int height = 720, int fps = 30}) async {
+  Future<void> startStream(
+      {int width = 1280, int height = 720, int fps = 30}) async {
     final interval = Duration(milliseconds: (1000 / fps).round());
     _timer = Timer.periodic(interval, (_) {
       final frame = img.Image(width: width, height: height);

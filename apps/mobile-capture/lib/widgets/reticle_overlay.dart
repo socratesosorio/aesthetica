@@ -18,7 +18,8 @@ class ReticleOverlay extends StatelessWidget {
                   width: w,
                   height: h,
                   decoration: BoxDecoration(
-                    border: Border.all(color: const Color(0xFFF5B342), width: 3),
+                    border:
+                        Border.all(color: const Color(0xFFF5B342), width: 3),
                     borderRadius: BorderRadius.circular(18),
                   ),
                 ),

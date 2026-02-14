@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
@@ -52,7 +51,8 @@ class RealDatService implements DatService {
   }
 
   @override
-  Future<void> startStream({int width = 1280, int height = 720, int fps = 30}) async {
+  Future<void> startStream(
+      {int width = 1280, int height = 720, int fps = 30}) async {
     await _method.invokeMethod('startVideoStream', {
       'width': width,
       'height': height,

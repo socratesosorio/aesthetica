@@ -40,7 +40,8 @@ class CapturePreprocessor {
     final scale = maxLongSide / longSide;
     final newW = (source.width * scale).round();
     final newH = (source.height * scale).round();
-    return img.copyResize(source, width: newW, height: newH, interpolation: img.Interpolation.average);
+    return img.copyResize(source,
+        width: newW, height: newH, interpolation: img.Interpolation.average);
   }
 
   Future<img.Image> _faceBlur(img.Image source) async {

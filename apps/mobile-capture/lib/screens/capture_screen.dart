@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -28,8 +29,14 @@ class _CaptureScreenState extends State<CaptureScreen> {
   String _status = 'Ready';
 
   // In production, this token comes from login/session flow.
-  final CaptureApiClient _api = CaptureApiClient(
-    baseUrl: const String.fromEnvironment('API_BASE_URL', defaultValue: 'http://10.0.2.2:8000'),
+  static const String _apiBaseUrlOverride =
+      String.fromEnvironment('API_BASE_URL', defaultValue: '');
+  late final String _defaultApiBaseUrl =
+      Platform.isAndroid ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
+  late final CaptureApiClient _api = CaptureApiClient(
+    baseUrl: _apiBaseUrlOverride.isNotEmpty
+        ? _apiBaseUrlOverride
+        : _defaultApiBaseUrl,
     authToken: const String.fromEnvironment('API_TOKEN', defaultValue: 'dev'),
   );
 
@@ -41,8 +48,10 @@ class _CaptureScreenState extends State<CaptureScreen> {
   }
 
   DatService _buildDatService() {
-    // Toggle by compile-time define for local development.
-    const useMock = bool.fromEnvironment('USE_MOCK_DAT', defaultValue: true);
+    // On iOS, default to native DAT bridge. On non-iOS, keep mock default.
+    const useMockOverride =
+        bool.fromEnvironment('USE_MOCK_DAT', defaultValue: false);
+    final useMock = Platform.isIOS ? useMockOverride : true;
     return useMock ? MockDatService() : RealDatService();
   }
 
@@ -175,7 +184,9 @@ class _CaptureScreenState extends State<CaptureScreen> {
                   ),
                   const SizedBox(height: 12),
                   GestureDetector(
-                    onTap: _state == CaptureState.sending ? null : _captureAndUpload,
+                    onTap: _state == CaptureState.sending
+                        ? null
+                        : _captureAndUpload,
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 220),
                       width: 88,
