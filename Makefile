@@ -1,6 +1,6 @@
 COMPOSE=docker compose -f infra/docker-compose.yml
 
-.PHONY: dev down logs test embed-products reindex migrate seed ui ui-build ui-install
+.PHONY: dev down logs logs-catalog test embed-products reindex migrate seed ui ui-build ui-install
 
 dev:
 	$(COMPOSE) up --build
@@ -10,6 +10,9 @@ down:
 
 logs:
 	$(COMPOSE) logs -f api worker
+
+logs-catalog:
+	$(COMPOSE) logs -f catalog-api
 
 test:
 	$(COMPOSE) run --rm api pytest -q

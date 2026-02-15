@@ -106,3 +106,41 @@ class UserRadarHistory(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     radar_vector_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class CatalogRequest(Base):
+    __tablename__ = "catalog_requests"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    original_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    original_content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    original_image_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    pipeline_status: Mapped[str] = mapped_column(String(64), nullable=False, default="processing")
+    garment_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    brand_hint: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text(), nullable=True)
+
+    recommendations: Mapped[list["CatalogRecommendation"]] = relationship(
+        back_populates="request",
+        cascade="all, delete-orphan",
+    )
+
+
+class CatalogRecommendation(Base):
+    __tablename__ = "catalog_recommendations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    request_id: Mapped[str] = mapped_column(ForeignKey("catalog_requests.id", ondelete="CASCADE"), index=True)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(1024), nullable=False)
+    product_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    source: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    price_text: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    price_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    query_used: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    recommendation_image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    recommendation_image_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+
+    request: Mapped[CatalogRequest] = relationship(back_populates="recommendations")

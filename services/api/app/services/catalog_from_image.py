@@ -1,0 +1,291 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from io import BytesIO
+import json
+import os
+import re
+from typing import Any
+
+import requests
+from PIL import Image
+from sqlalchemy.orm import Session
+
+from app.models import CatalogRecommendation, CatalogRequest
+from app.schemas.catalog import CatalogFromImageResponse, CatalogRecommendationOut
+
+
+@dataclass(slots=True)
+class CatalogConfig:
+    top_k: int = 5
+    openai_model: str = "gpt-4o-mini"
+    openai_timeout_sec: int = 25
+    serp_timeout_sec: int = 20
+    rec_image_timeout_sec: int = 8
+    use_rich_context: bool = True
+
+
+def process_catalog_from_image(
+    db: Session,
+    image_bytes: bytes,
+    filename: str | None,
+    content_type: str | None,
+    config: CatalogConfig | None = None,
+) -> CatalogFromImageResponse:
+    cfg = config or CatalogConfig()
+    top_k = max(1, min(cfg.top_k, 5))
+    req = CatalogRequest(
+        original_filename=_clip(filename, 255),
+        original_content_type=_clip(content_type, 128),
+        original_image_bytes=image_bytes,
+        pipeline_status="processing",
+    )
+    db.add(req)
+    db.commit()
+    db.refresh(req)
+
+    try:
+        signal = _analyze_image_openai(image_bytes, cfg)
+        queries = _build_queries(signal, use_rich_context=cfg.use_rich_context)
+        matches = _search_serp(queries[0], cfg, max_results=max(10, top_k))
+        ranked = _rank_matches(signal, matches)[:top_k]
+
+        req.pipeline_status = "ok" if ranked else "no_products_found"
+        req.garment_name = signal.get("garment_name")
+        req.brand_hint = signal.get("brand_hint")
+        req.confidence = float(signal.get("confidence", 0.0))
+        rows: list[CatalogRecommendation] = []
+        for idx, m in enumerate(ranked, start=1):
+            row = CatalogRecommendation(
+                request_id=req.id,
+                rank=idx,
+                title=_clip(m.get("title"), 1024) or "",
+                product_url=_clip(m.get("product_url"), 2048) or "",
+                source=_clip(m.get("source"), 255),
+                price_text=_clip(m.get("price_text"), 128),
+                price_value=m.get("price_value"),
+                query_used=_clip(m.get("query"), 2000),
+                recommendation_image_url=_clip(m.get("image_url"), 2048),
+                recommendation_image_bytes=_download_image_bytes(m.get("image_url"), cfg.rec_image_timeout_sec),
+            )
+            db.add(row)
+            rows.append(row)
+        db.commit()
+        db.refresh(req)
+        return _to_response(req, rows)
+    except Exception as exc:
+        req.pipeline_status = "pipeline_error"
+        req.error = f"{type(exc).__name__}: {exc}"
+        db.commit()
+        db.refresh(req)
+        return _to_response(req, [])
+
+
+def _analyze_image_openai(image_bytes: bytes, cfg: CatalogConfig) -> dict[str, Any]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is required")
+
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    url = _to_data_url(img)
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    system = (
+        "Return strict JSON with keys: is_shirt (bool), confidence (0-1), garment_name (string), "
+        "brand_hint (string|null), color_hint (string|null), style_tags (array of strings), "
+        "exact_item_hint (string|null), context_terms (array of strings). "
+        "For tops classify as one of hoodie, sweatshirt, t-shirt, polo, button-up shirt, jersey, sweater, tank top, shirt."
+    )
+    body = {
+        "model": cfg.openai_model,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Analyze the main upper-body clothing item."},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            },
+        ],
+        "temperature": 0.0,
+    }
+    resp = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=headers,
+        json=body,
+        timeout=cfg.openai_timeout_sec,
+    )
+    resp.raise_for_status()
+    raw = resp.json()["choices"][0]["message"]["content"]
+    parsed = json.loads(raw)
+    return {
+        "is_shirt": bool(parsed.get("is_shirt", True)),
+        "confidence": float(parsed.get("confidence", 0.7)),
+        "garment_name": _clean(parsed.get("garment_name")) or "shirt",
+        "brand_hint": _clean(parsed.get("brand_hint")),
+        "color_hint": _clean(parsed.get("color_hint")),
+        "style_tags": [str(x).strip() for x in parsed.get("style_tags", []) if str(x).strip()],
+        "exact_item_hint": _clean(parsed.get("exact_item_hint")),
+        "context_terms": [str(x).strip() for x in parsed.get("context_terms", []) if str(x).strip()],
+    }
+
+
+def _search_serp(query: str, cfg: CatalogConfig, max_results: int) -> list[dict[str, Any]]:
+    api_key = os.getenv("SERPAPI_API_KEY")
+    if not api_key:
+        raise RuntimeError("SERPAPI_API_KEY is required")
+    params = {
+        "engine": "google_shopping",
+        "q": query,
+        "api_key": api_key,
+        "gl": "us",
+        "hl": "en",
+        "num": max_results,
+    }
+    resp = requests.get("https://serpapi.com/search.json", params=params, timeout=cfg.serp_timeout_sec)
+    resp.raise_for_status()
+    data = resp.json()
+    out: list[dict[str, Any]] = []
+    for row in data.get("shopping_results", []):
+        link = row.get("product_link") or row.get("link")
+        title = row.get("title")
+        if not link or not title:
+            continue
+        out.append(
+            {
+                "title": str(title),
+                "product_url": str(link),
+                "source": _clean(row.get("source")),
+                "price_text": _clean(row.get("price")),
+                "price_value": _price_value(row.get("price") or row.get("extracted_price")),
+                "image_url": _clean(row.get("thumbnail")),
+                "query": query,
+            }
+        )
+    return out
+
+
+def _build_queries(signal: dict[str, Any], use_rich_context: bool) -> list[str]:
+    garment = signal.get("garment_name") or "shirt"
+    brand = signal.get("brand_hint")
+    color = signal.get("color_hint")
+    style = " ".join(signal.get("style_tags", [])[:2]).strip()
+    generic = " ".join([x for x in [color, garment, style] if x]).strip() or garment
+    queries: list[str] = []
+    if brand:
+        queries.append(f"{brand} {generic}".strip())
+    if use_rich_context and signal.get("exact_item_hint"):
+        queries.append(str(signal["exact_item_hint"]).strip())
+    queries.append(generic)
+    seen: set[str] = set()
+    out: list[str] = []
+    for q in queries:
+        k = q.lower().strip()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(q)
+    return out or ["shirt"]
+
+
+def _rank_matches(signal: dict[str, Any], matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    query_tokens = set(_tokens(" ".join(_build_queries(signal, use_rich_context=False))))
+    brand = (signal.get("brand_hint") or "").lower().strip()
+    preferred = (signal.get("garment_name") or "shirt").lower().strip()
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for m in matches:
+        title_l = (m.get("title") or "").lower()
+        overlap = len(query_tokens & set(_tokens(m.get("title") or "")))
+        score = float(overlap)
+        if brand:
+            score += 5.0 if brand in title_l else -2.0
+        if preferred and preferred != "shirt" and preferred in title_l:
+            score += 1.5
+        if m.get("price_value") is not None:
+            score += 0.4
+        if "google.com/search" not in (m.get("product_url") or "").lower():
+            score += 1.0
+        scored.append((score, m))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [m for _, m in scored]
+
+
+def _download_image_bytes(url: str | None, timeout_sec: int) -> bytes | None:
+    if not url:
+        return None
+    try:
+        r = requests.get(url, timeout=timeout_sec)
+        r.raise_for_status()
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        if "image" not in ctype:
+            return None
+        return r.content
+    except Exception:
+        return None
+
+
+def _to_data_url(image: Image.Image) -> str:
+    import base64
+
+    buf = BytesIO()
+    image.save(buf, format="JPEG", quality=90)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) > 1]
+
+
+def _clean(v: Any) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _clip(v: str | None, n: int) -> str | None:
+    if v is None:
+        return None
+    return v[:n]
+
+
+def _price_value(raw: Any) -> float | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    m = re.search(r"(\d+(?:\.\d{1,2})?)", str(raw).replace(",", ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _to_response(req: CatalogRequest, rows: list[CatalogRecommendation]) -> CatalogFromImageResponse:
+    rows = sorted(rows, key=lambda x: x.rank)
+    return CatalogFromImageResponse(
+        request_id=req.id,
+        created_at=req.created_at,
+        pipeline_status=req.pipeline_status,
+        garment_name=req.garment_name,
+        brand_hint=req.brand_hint,
+        confidence=req.confidence,
+        error=req.error,
+        recommendation_count=len(rows),
+        recommendations=[
+            CatalogRecommendationOut(
+                rank=r.rank,
+                title=r.title,
+                product_url=r.product_url,
+                source=r.source,
+                price_text=r.price_text,
+                price_value=r.price_value,
+                query_used=r.query_used,
+                recommendation_image_url=r.recommendation_image_url,
+                has_recommendation_image_bytes=r.recommendation_image_bytes is not None,
+            )
+            for r in rows
+        ],
+    )

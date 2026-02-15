@@ -10,7 +10,8 @@ from app.db.base import Base
 from app.models import all_models  # noqa: F401
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# ConfigParser treats "%" as interpolation markers; escape percent-encoded DSNs.
+config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

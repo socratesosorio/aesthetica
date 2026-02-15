@@ -52,6 +52,7 @@ make embed-products
 
 API: `http://localhost:8000`  
 Dashboard: `http://localhost:5173`
+Catalog API: `http://localhost:8001`
 
 ## Running Services Individually
 
@@ -135,3 +136,33 @@ Includes:
 - Health: `/healthz`, `/readyz`
 - JSON structured logs with request/capture correlation IDs.
 - Celery async jobs with retry support.
+
+## Catalog API (Restored)
+
+Dedicated endpoint for image -> OpenAI -> Serp -> DB write:
+
+- `POST http://localhost:8001/v1/catalog/from-image`
+- No auth
+- Accepts multipart `image` upload or raw `image/jpeg` body
+
+Run (from repo root):
+
+```bash
+cp .env.example .env
+docker compose -f infra/docker-compose.yml up -d --build postgres redis api catalog-api
+make migrate
+```
+
+Test:
+
+```bash
+curl -s -X POST "http://localhost:8001/v1/catalog/from-image" \
+  -F "image=@tests/web_detection/test_images/dodgers.jpeg"
+```
+
+Quick health checks:
+
+```bash
+curl -s http://localhost:8001/healthz
+curl -s http://localhost:8001/readyz
+```
