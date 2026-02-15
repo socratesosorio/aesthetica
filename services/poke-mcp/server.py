@@ -7,26 +7,23 @@ sys.path.insert(0, "/app/services/api")
 sys.path.insert(0, "/app/services/ml")
 
 import logging
-from datetime import datetime, timedelta, timezone
+from collections import Counter
+
+import json
+import os
 
 import httpx
-import numpy as np
+import requests
 from fastmcp import FastMCP
 from sqlalchemy import desc, func
 
 from app.db.session import SessionLocal
 from app.models import (
-    Capture,
-    CatalogRecommendation,
     CatalogRequest,
-    Garment,
-    Match,
     Product,
     StyleRecommendation,
     StyleScore,
     User,
-    UserProfile,
-    UserRadarHistory,
 )
 from app.services.catalog_from_image import (
     CatalogConfig,
@@ -35,9 +32,9 @@ from app.services.catalog_from_image import (
     _style_recommendation_prompt,
     process_catalog_from_image,
 )
+from app.services.web_product_search import SerpApiWebProductSearcher
 from ml_core.embeddings import get_embedder
 from ml_core.retrieval import CATEGORIES, get_catalog
-from ml_core.taste import AXES, TasteProfileEngine, generate_aesthetic_summary
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("poke-mcp")
@@ -45,14 +42,6 @@ logger = logging.getLogger("poke-mcp")
 mcp = FastMCP("Aesthetica — AI Fashion Intelligence")
 
 DEMO_USER_ID: str | None = None
-
-AXIS_LABELS = {
-    "minimal_maximal": ("Minimal", "Maximal"),
-    "structured_relaxed": ("Structured", "Relaxed"),
-    "neutral_color_forward": ("Neutral", "Colorful"),
-    "classic_experimental": ("Classic", "Experimental"),
-    "casual_formal": ("Casual", "Formal"),
-}
 
 STYLE_AXES = ["casual", "minimal", "structured", "classic", "neutral"]
 
@@ -78,142 +67,6 @@ def _get_demo_user_id() -> str | None:
 def _bar(value: float, width: int = 10) -> str:
     filled = round(value / 100 * width)
     return "█" * filled + "░" * (width - filled)
-
-
-@mcp.tool()
-def get_taste_profile() -> str:
-    """Get your current fashion taste profile — a 5-axis radar showing your style DNA."""
-    uid = _get_demo_user_id()
-    if not uid:
-        return "No user profile found. Upload an outfit first!"
-
-    db = SessionLocal()
-    try:
-        profile = db.query(UserProfile).filter(UserProfile.user_id == uid).first()
-        if not profile or not profile.radar_vector_json:
-            return "No taste profile yet — upload an outfit to start building yours!"
-
-        radar = profile.radar_vector_json
-        captures_count = db.query(Capture).filter(
-            Capture.user_id == uid, Capture.status == "done"
-        ).count()
-
-        lines = ["✦ Your Fashion Taste Profile ✦", ""]
-        for axis, score in radar.items():
-            lo, hi = AXIS_LABELS.get(axis, (axis, axis))
-            lines.append(f"  {lo:<13} {_bar(score)} {hi:>13}  ({score:.0f}/100)")
-        lines.append("")
-        lines.append(f"Based on {captures_count} analyzed outfit(s).")
-
-        if profile.brand_stats:
-            top_brands = sorted(profile.brand_stats.items(), key=lambda x: x[1], reverse=True)[:3]
-            lines.append(f"Top brands: {', '.join(b for b, _ in top_brands)}")
-
-        if profile.color_stats:
-            top_colors = sorted(profile.color_stats.items(), key=lambda x: x[1], reverse=True)[:3]
-            lines.append(f"Favorite colors: {', '.join(c for c, _ in top_colors)}")
-
-        return "\n".join(lines)
-    finally:
-        db.close()
-
-
-@mcp.tool()
-def get_recent_looks(limit: int = 5) -> str:
-    """Browse your recently captured outfits."""
-    uid = _get_demo_user_id()
-    if not uid:
-        return "No user found."
-
-    db = SessionLocal()
-    try:
-        captures = (
-            db.query(Capture)
-            .filter(Capture.user_id == uid, Capture.status == "done")
-            .order_by(desc(Capture.created_at))
-            .limit(limit)
-            .all()
-        )
-        if not captures:
-            return "No outfits captured yet! Send me a photo to get started."
-
-        lines = [f"Your {len(captures)} Most Recent Looks:", ""]
-        for i, cap in enumerate(captures, 1):
-            date = cap.created_at.strftime("%b %d, %Y") if cap.created_at else "Unknown"
-            garment_count = len(cap.garments)
-            match_count = len(cap.matches)
-            attrs = cap.global_attributes_json or {}
-            silhouette = attrs.get("silhouette", "")
-            colors = attrs.get("colors", [])
-            color_str = ", ".join(c.get("name", c.get("hex", "")) for c in colors[:2]) if colors else ""
-
-            desc_parts = []
-            if silhouette:
-                desc_parts.append(silhouette)
-            if color_str:
-                desc_parts.append(color_str)
-            desc_text = " — " + ", ".join(desc_parts) if desc_parts else ""
-
-            lines.append(f"  {i}. [{date}] {garment_count} garment(s), {match_count} match(es){desc_text}")
-            lines.append(f"     ID: {cap.id}")
-
-        lines.append("")
-        lines.append("Use get_look_details with an ID for more info on any look.")
-        return "\n".join(lines)
-    finally:
-        db.close()
-
-
-@mcp.tool()
-def get_look_details(capture_id: str) -> str:
-    """Get full details for a specific captured outfit including matched products."""
-    uid = _get_demo_user_id()
-    if not uid:
-        return "No user found."
-
-    db = SessionLocal()
-    try:
-        capture = (
-            db.query(Capture)
-            .filter(Capture.id == capture_id, Capture.user_id == uid)
-            .first()
-        )
-        if not capture:
-            return f"Look {capture_id} not found."
-
-        lines = [f"Look Details — {capture.created_at.strftime('%b %d, %Y') if capture.created_at else ''}", ""]
-
-        attrs = capture.global_attributes_json or {}
-        if attrs.get("silhouette"):
-            lines.append(f"Silhouette: {attrs['silhouette']}")
-        colors = attrs.get("colors", [])
-        if colors:
-            lines.append(f"Colors: {', '.join(c.get('name', c.get('hex', '')) for c in colors[:4])}")
-
-        if capture.garments:
-            lines.append("")
-            lines.append("Garments detected:")
-            for g in capture.garments:
-                g_attrs = g.attributes_json or {}
-                color_info = ""
-                g_colors = g_attrs.get("colors", [])
-                if g_colors:
-                    color_info = f" ({', '.join(c.get('name', c.get('hex', '')) for c in g_colors[:2])})"
-                lines.append(f"  • {g.garment_type}{color_info}")
-
-        if capture.matches:
-            lines.append("")
-            lines.append("Product matches:")
-            for m in capture.matches[:5]:
-                product = db.query(Product).filter(Product.id == m.product_id).first()
-                if product:
-                    price = f" — ${product.price:.0f}" if product.price else ""
-                    lines.append(f"  {m.rank}. {product.title} by {product.brand}{price}")
-                    lines.append(f"     Similarity: {m.similarity:.1%} | {product.product_url}")
-
-        return "\n".join(lines)
-    finally:
-        db.close()
 
 
 @mcp.tool()
@@ -266,105 +119,6 @@ def find_similar_products(query: str, category: str = "top", include_web: bool =
         return f"No products found for '{query}'."
 
     return "\n".join(lines)
-
-
-@mcp.tool()
-def get_radar_history(days: int = 30) -> str:
-    """See how your fashion taste has evolved over time."""
-    uid = _get_demo_user_id()
-    if not uid:
-        return "No user found."
-
-    db = SessionLocal()
-    try:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        records = (
-            db.query(UserRadarHistory)
-            .filter(UserRadarHistory.user_id == uid, UserRadarHistory.created_at >= cutoff)
-            .order_by(UserRadarHistory.created_at)
-            .all()
-        )
-        if not records:
-            return f"No taste history in the last {days} days."
-
-        lines = [f"Taste Evolution — Last {days} Days ({len(records)} snapshots)", ""]
-
-        first = records[0].radar_vector_json
-        last = records[-1].radar_vector_json
-
-        for axis in AXES:
-            lo, hi = AXIS_LABELS.get(axis, (axis, axis))
-            start_val = first.get(axis, 50)
-            end_val = last.get(axis, 50)
-            delta = end_val - start_val
-            arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
-            lines.append(f"  {lo}/{hi}: {start_val:.0f} → {end_val:.0f} ({arrow}{abs(delta):.1f})")
-
-        return "\n".join(lines)
-    finally:
-        db.close()
-
-
-@mcp.tool()
-def get_style_summary() -> str:
-    """Get a natural language summary of your overall fashion identity."""
-    uid = _get_demo_user_id()
-    if not uid:
-        return "No user found."
-
-    db = SessionLocal()
-    try:
-        profile = db.query(UserProfile).filter(UserProfile.user_id == uid).first()
-        if not profile or not profile.radar_vector_json:
-            return "Not enough data for a style summary. Upload more outfits!"
-
-        radar = profile.radar_vector_json
-
-        captures_count = db.query(Capture).filter(
-            Capture.user_id == uid, Capture.status == "done"
-        ).count()
-
-        last_capture = (
-            db.query(Capture)
-            .filter(Capture.user_id == uid, Capture.status == "done")
-            .order_by(desc(Capture.created_at))
-            .first()
-        )
-
-        lines = ["✦ Your Style Summary ✦", ""]
-
-        if last_capture and last_capture.global_attributes_json:
-            summary = generate_aesthetic_summary(last_capture.global_attributes_json, radar)
-            lines.append(summary)
-            lines.append("")
-
-        dominant_traits = []
-        for axis, score in radar.items():
-            lo, hi = AXIS_LABELS.get(axis, (axis, axis))
-            if score < 35:
-                dominant_traits.append(lo.lower())
-            elif score > 65:
-                dominant_traits.append(hi.lower())
-        if dominant_traits:
-            lines.append(f"Strong style traits: {', '.join(dominant_traits)}")
-
-        if profile.brand_stats:
-            top_brands = sorted(profile.brand_stats.items(), key=lambda x: x[1], reverse=True)[:5]
-            lines.append(f"Brand affinity: {', '.join(f'{b} ({c})' for b, c in top_brands)}")
-
-        if profile.color_stats:
-            top_colors = sorted(profile.color_stats.items(), key=lambda x: x[1], reverse=True)[:5]
-            lines.append(f"Color palette: {', '.join(c for c, _ in top_colors)}")
-
-        if profile.category_bias:
-            top_cats = sorted(profile.category_bias.items(), key=lambda x: x[1], reverse=True)[:3]
-            lines.append(f"Wardrobe focus: {', '.join(f'{c} ({n})' for c, n in top_cats)}")
-
-        lines.append("")
-        lines.append(f"Based on {captures_count} outfit(s) analyzed.")
-        return "\n".join(lines)
-    finally:
-        db.close()
 
 
 @mcp.tool()
@@ -614,38 +368,27 @@ def get_style_recommendations(category_hint: str = "") -> str:
 
 @mcp.tool()
 def get_wardrobe_stats() -> str:
-    """Get aggregate wardrobe statistics — total captures, catalog scans, average style scores, top brands and colors."""
-    uid = _get_demo_user_id()
+    """Get aggregate wardrobe statistics — catalog scans, average style scores, most scanned garment types and brands."""
     db = SessionLocal()
     try:
         lines = ["✦ Wardrobe Stats ✦", ""]
-
-        # Capture stats (user-scoped if available)
-        if uid:
-            capture_count = db.query(Capture).filter(
-                Capture.user_id == uid, Capture.status == "done"
-            ).count()
-            last_capture = (
-                db.query(Capture)
-                .filter(Capture.user_id == uid, Capture.status == "done")
-                .order_by(desc(Capture.created_at))
-                .first()
-            )
-        else:
-            capture_count = 0
-            last_capture = None
 
         catalog_count = db.query(CatalogRequest).filter(
             CatalogRequest.pipeline_status != "processing"
         ).count()
         style_score_count = db.query(StyleScore).count()
 
-        lines.append(f"Total outfit captures: {capture_count}")
         lines.append(f"Catalog scans: {catalog_count}")
         lines.append(f"Style scores recorded: {style_score_count}")
 
-        if last_capture and last_capture.created_at:
-            lines.append(f"Last capture: {last_capture.created_at.strftime('%b %d, %Y %H:%M')}")
+        last_scan = (
+            db.query(CatalogRequest)
+            .filter(CatalogRequest.pipeline_status != "processing")
+            .order_by(desc(CatalogRequest.created_at))
+            .first()
+        )
+        if last_scan and last_scan.created_at:
+            lines.append(f"Last scan: {last_scan.created_at.strftime('%b %d, %Y %H:%M')}")
 
         # Average style scores
         if style_score_count > 0:
@@ -663,19 +406,228 @@ def get_wardrobe_stats() -> str:
                 val = float(avg_map.get(axis) or 50.0)
                 lines.append(f"  {axis:<12} {_bar(val)} {val:.0f}")
 
-        # User profile stats
-        if uid:
-            profile = db.query(UserProfile).filter(UserProfile.user_id == uid).first()
-            if profile:
-                if profile.brand_stats:
-                    top_brands = sorted(profile.brand_stats.items(), key=lambda x: x[1], reverse=True)[:5]
-                    lines.append("")
-                    lines.append(f"Top brands: {', '.join(f'{b} ({c})' for b, c in top_brands)}")
-                if profile.color_stats:
-                    top_colors = sorted(profile.color_stats.items(), key=lambda x: x[1], reverse=True)[:5]
-                    lines.append(f"Top colors: {', '.join(c for c, _ in top_colors)}")
+        # Most scanned garment types and brands from CatalogRequest
+        catalog_rows = (
+            db.query(CatalogRequest.garment_name, CatalogRequest.brand_hint)
+            .filter(CatalogRequest.pipeline_status != "processing")
+            .all()
+        )
+        if catalog_rows:
+            garment_counts = Counter(
+                r.garment_name for r in catalog_rows if r.garment_name
+            )
+            if garment_counts:
+                top_garments = garment_counts.most_common(5)
+                lines.append("")
+                lines.append(f"Most scanned: {', '.join(f'{g} ({c})' for g, c in top_garments)}")
+
+            brand_counts = Counter(
+                r.brand_hint for r in catalog_rows if r.brand_hint
+            )
+            if brand_counts:
+                top_brands = brand_counts.most_common(5)
+                lines.append(f"Top brands: {', '.join(f'{b} ({c})' for b, c in top_brands)}")
 
         return "\n".join(lines)
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def get_my_style() -> str:
+    """Get your unified style identity — 5-axis scores, recent scan descriptions, and top garments/brands from your history."""
+    db = SessionLocal()
+    try:
+        style_ctx = _last_style_context(db, limit=10)
+
+        if not style_ctx.get("descriptions"):
+            return "No style data yet. Analyze some outfits to build your style identity!"
+
+        lines = ["✦ Your Style Identity ✦", ""]
+
+        # 5-axis rolling averages with visual bars
+        avg = style_ctx.get("avg", {})
+        lines.append("Style Profile (rolling average):")
+        for axis in STYLE_AXES:
+            score = avg.get(axis, 50.0)
+            lines.append(f"  {axis:<12} {_bar(score)} {score:.0f}/100")
+
+        # Recent descriptions (what they've been scanning)
+        descriptions = style_ctx.get("descriptions", [])
+        if descriptions:
+            lines.append("")
+            lines.append("Recent scans:")
+            for i, desc_text in enumerate(descriptions[-5:], 1):
+                if desc_text:
+                    lines.append(f"  {i}. {desc_text[:200]}")
+
+        # Top garments and brands from CatalogRequest history
+        catalog_rows = (
+            db.query(CatalogRequest.garment_name, CatalogRequest.brand_hint)
+            .filter(CatalogRequest.pipeline_status != "processing")
+            .order_by(desc(CatalogRequest.created_at))
+            .limit(50)
+            .all()
+        )
+        if catalog_rows:
+            garment_counts = Counter(
+                r.garment_name for r in catalog_rows if r.garment_name
+            )
+            if garment_counts:
+                top_garments = garment_counts.most_common(5)
+                lines.append("")
+                lines.append(f"Most scanned garments: {', '.join(f'{g} ({c})' for g, c in top_garments)}")
+
+            brand_counts = Counter(
+                r.brand_hint for r in catalog_rows if r.brand_hint
+            )
+            if brand_counts:
+                top_brands = brand_counts.most_common(5)
+                lines.append(f"Favorite brands: {', '.join(f'{b} ({c})' for b, c in top_brands)}")
+
+        return "\n".join(lines)
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def search_clothes(query: str, category: str = "top", max_results: int = 5) -> str:
+    """Search for clothing items to buy — returns Google Shopping results with titles, prices, brands, and links."""
+    try:
+        searcher = SerpApiWebProductSearcher()
+        attributes = {"query_text": query}
+        results = searcher.search(
+            category=category,
+            attributes=attributes,
+            limit=max(1, min(max_results, 10)),
+        )
+
+        if not results:
+            # Fall back to direct SerpAPI search via _search_serp
+            cfg = CatalogConfig()
+            serp_results = _search_serp(query, cfg, max_results=max(1, min(max_results, 10)))
+            if not serp_results:
+                return f"No results found for '{query}'. Try a different search term."
+
+            lines = [f"Shopping results for \"{query}\":", ""]
+            for i, item in enumerate(serp_results, 1):
+                price = f" — {item['price_text']}" if item.get("price_text") else ""
+                source = f" ({item['source']})" if item.get("source") else ""
+                lines.append(f"  {i}. {item['title']}{price}{source}")
+                lines.append(f"     {item['product_url']}")
+            return "\n".join(lines)
+
+        lines = [f"Shopping results for \"{query}\" ({category}):", ""]
+        for i, cand in enumerate(results, 1):
+            price = f" — ${cand.price:.2f}" if cand.price else ""
+            lines.append(f"  {i}. {cand.title}{price} ({cand.brand})")
+            lines.append(f"     {cand.product_url}")
+
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.exception("search_clothes_failed")
+        return f"Search failed: {type(exc).__name__}: {exc}"
+
+
+@mcp.tool()
+def build_outfit(occasion: str, budget: str = "") -> str:
+    """Build a complete outfit (top + bottom + extras) for an occasion, using your style profile and AI. Example occasions: 'date night', 'casual brunch', 'job interview'."""
+    db = SessionLocal()
+    try:
+        cfg = CatalogConfig()
+        style_ctx = _last_style_context(db, limit=5)
+
+        # Step 1: Call OpenAI to generate piece-by-piece search queries
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return "OpenAI API key not configured — cannot build outfit."
+
+        avg_scores = json.dumps(style_ctx.get("avg", {}))
+        recent_descs = json.dumps(style_ctx.get("descriptions", [])[-3:])
+        budget_note = f" Budget constraint: {budget}." if budget else ""
+
+        system_prompt = (
+            "You are a fashion stylist AI. Return strict JSON with keys: "
+            "pieces (array of objects with 'role' and 'search_query'), outfit_rationale (string). "
+            "Each piece should have role as one of: top, bottom, shoes, accessory. "
+            "search_query should be a concise Google Shopping query for that specific piece. "
+            "Generate 2-4 pieces that form a cohesive outfit."
+        )
+        user_prompt = (
+            f"Build an outfit for: {occasion}.{budget_note}\n"
+            f"User's style profile (5-axis averages): {avg_scores}\n"
+            f"Recent outfit descriptions: {recent_descs}\n"
+            "Generate search queries for each outfit piece that match both the occasion and the user's style."
+        )
+
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": cfg.openai_model,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.4,
+            },
+            timeout=cfg.openai_timeout_sec,
+        )
+        resp.raise_for_status()
+        outfit_plan = json.loads(resp.json()["choices"][0]["message"]["content"])
+
+        pieces = outfit_plan.get("pieces", [])
+        rationale = outfit_plan.get("outfit_rationale", "")
+
+        if not pieces:
+            return "AI couldn't generate an outfit plan. Try a different occasion."
+
+        # Step 2: Search for each piece
+        lines = [f"✦ Outfit for: {occasion} ✦", ""]
+        if rationale:
+            lines.append(f"Concept: {rationale}")
+            lines.append("")
+
+        for piece in pieces:
+            role = piece.get("role", "item").capitalize()
+            search_query = piece.get("search_query", "")
+            if not search_query:
+                continue
+
+            if budget:
+                search_query = f"{search_query} {budget}"
+
+            lines.append(f"[{role}]")
+            lines.append(f"  Searching: \"{search_query}\"")
+
+            try:
+                results = _search_serp(search_query, cfg, max_results=3)
+                if results:
+                    for i, item in enumerate(results[:2], 1):
+                        price = f" — {item['price_text']}" if item.get("price_text") else ""
+                        source = f" ({item['source']})" if item.get("source") else ""
+                        lines.append(f"  {i}. {item['title']}{price}{source}")
+                        lines.append(f"     {item['product_url']}")
+                else:
+                    lines.append("  No products found for this piece.")
+            except Exception as exc:
+                logger.warning("outfit_piece_search_failed role=%s: %s", role, exc)
+                lines.append(f"  Search failed for this piece.")
+
+            lines.append("")
+
+        # Show style context
+        avg = style_ctx.get("avg", {})
+        lines.append("Based on your style profile:")
+        for axis in STYLE_AXES:
+            score = avg.get(axis, 50.0)
+            lines.append(f"  {axis:<12} {_bar(score)} {score:.0f}")
+
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.exception("build_outfit_failed")
+        return f"Outfit builder failed: {type(exc).__name__}: {exc}"
     finally:
         db.close()
 
