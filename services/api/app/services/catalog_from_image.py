@@ -105,7 +105,7 @@ def process_catalog_from_image(
         req.confidence = float(style_signal.get("confidence", 0.0))
         db.commit()
         db.refresh(req)
-        _notify_poke(signal, ranked)
+        _notify_poke(style_signal, style_ranked)
         return _to_response(req, rows)
     except Exception as exc:
         req.pipeline_status = "pipeline_error"
@@ -138,10 +138,13 @@ def _notify_poke(signal: dict[str, Any], ranked: list[dict[str, Any]]) -> None:
             top = ranked[0]
             title = top.get("title", "")
             price = top.get("price_text")
+            product_url = top.get("product_url")
             image_url = top.get("image_url")
             top_match = f"Top match: {title}"
             if price:
                 top_match += f" ({price})"
+            if product_url:
+                top_match += f"\n{product_url}"
             if len(ranked) > 1:
                 top_match += f"\n+ {len(ranked) - 1} more options saved"
 
