@@ -23,6 +23,12 @@ cors_origins = {
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 }
+extra_origins = [
+    origin.strip().rstrip("/")
+    for origin in settings.cors_extra_origins.split(",")
+    if origin.strip()
+]
+cors_origins.update(extra_origins)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(cors_origins),

@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { Database, ExternalLink, RefreshCcw } from 'lucide-react'
 
 import {
@@ -79,6 +79,8 @@ function DatabaseTopbar({ onRefresh }: { onRefresh: () => void }) {
 
 export default function DatabasePage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const captureParam = searchParams.get('capture')
 
   const [token, setToken] = React.useState<string | null>(null)
   const [me, setMe] = React.useState<ApiUserOut | null>(null)
@@ -89,6 +91,7 @@ export default function DatabasePage() {
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
   const [reloadKey, setReloadKey] = React.useState(0)
+  const [openCaptureId, setOpenCaptureId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     const ctrl = new AbortController()
@@ -105,7 +108,8 @@ export default function DatabasePage() {
             : null)
 
         if (!t) {
-          router.replace(`/login?next=${encodeURIComponent('/database')}`)
+          const next = captureParam ? `/database?capture=${encodeURIComponent(captureParam)}` : '/database'
+          router.replace(`/login?next=${encodeURIComponent(next)}`)
           return
         }
 
@@ -119,9 +123,15 @@ export default function DatabasePage() {
           api.userCaptures(user.id, t, 50, ctrl.signal).catch(() => []),
         ])
 
+        let capturesForView = c
+        if (captureParam && !capturesForView.some((row) => row.id === captureParam)) {
+          const exact = await api.capture(captureParam, t, ctrl.signal).catch(() => null)
+          if (exact) capturesForView = [exact, ...capturesForView]
+        }
+
         setProfile(p)
         setHistory(h)
-        setCaptures(c)
+        setCaptures(capturesForView)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load database view.')
       } finally {
@@ -131,7 +141,18 @@ export default function DatabasePage() {
 
     load()
     return () => ctrl.abort()
-  }, [router, reloadKey])
+  }, [router, reloadKey, captureParam])
+
+  React.useEffect(() => {
+    if (!captures.length) {
+      setOpenCaptureId(null)
+      return
+    }
+    setOpenCaptureId((cur) => {
+      if (captureParam && captures.some((c) => c.id === captureParam)) return captureParam
+      return cur && captures.some((c) => c.id === cur) ? cur : null
+    })
+  }, [captures, captureParam])
 
   const totals = React.useMemo(() => {
     let garments = 0
@@ -336,7 +357,13 @@ export default function DatabasePage() {
                 </CardHeader>
                 <CardContent className="pt-0">
                   {captures.length ? (
-                    <Accordion type="single" collapsible className="w-full">
+                    <Accordion
+                      type="single"
+                      collapsible
+                      value={openCaptureId ?? undefined}
+                      onValueChange={(v) => setOpenCaptureId(v || null)}
+                      className="w-full"
+                    >
                       {captures.map((cap) => {
                         const garmentCount = cap.garments?.length ?? 0
                         const matchCount = cap.matches?.length ?? 0
@@ -509,4 +536,3 @@ export default function DatabasePage() {
     </main>
   )
 }
-

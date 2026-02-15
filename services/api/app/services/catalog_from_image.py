@@ -210,7 +210,7 @@ def _notify_poke(
         link = None
         if request_id:
             base = settings.base_dashboard_url.rstrip("/")
-            link = f"{base}/catalog/{request_id}"
+            link = f"{base}/profile?capture={request_id}"
         if not link:
             link = product_url
 

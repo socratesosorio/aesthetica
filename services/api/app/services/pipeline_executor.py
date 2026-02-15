@@ -337,7 +337,7 @@ def process_capture(db: Session, capture_id: str, notifier: PokeNotifier | None 
                     f"{summary}\n"
                     f"Radar delta: {delta_line}\n"
                     f"Top matches: {' | '.join(links)}\n"
-                    f"View: {settings.base_dashboard_url}/looks/{capture_id}"
+                    f"View: {settings.base_dashboard_url}/database?capture={capture_id}"
                 )
                 notifier.send(message)
             except Exception:

@@ -48,7 +48,7 @@ services:
       dockerfile: services/api/Dockerfile
     container_name: aesthetica-api
     env_file:
-      - ../.env
+      - ${ENV_FILE:-../.env}
     environment:
       PYTHONPATH: /app/services/api:/app/services/ml:/app/services/worker
       REDIS_URL: redis://redis:6379/0
@@ -74,7 +74,7 @@ services:
       dockerfile: services/api/Dockerfile
     container_name: aesthetica-catalog-api
     env_file:
-      - ../.env
+      - ${ENV_FILE:-../.env}
     environment:
       PYTHONPATH: /app/services/api:/app/services/ml:/app/services/worker
       LOCAL_STORAGE_ROOT: /app/data/uploads
@@ -93,7 +93,7 @@ services:
       dockerfile: services/worker/Dockerfile
     container_name: aesthetica-worker
     env_file:
-      - ../.env
+      - ${ENV_FILE:-../.env}
     environment:
       PYTHONPATH: /app/services/api:/app/services/ml:/app/services/worker
       REDIS_URL: redis://redis:6379/0
@@ -117,7 +117,7 @@ services:
       dockerfile: services/poke-mcp/Dockerfile
     container_name: aesthetica-poke-mcp
     env_file:
-      - ../.env
+      - ${ENV_FILE:-../.env}
     environment:
       PYTHONPATH: /app/services/api:/app/services/ml:/app/services/poke-mcp
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/aesthetica

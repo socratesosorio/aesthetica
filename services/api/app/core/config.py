@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     default_top_k: int = 30
     base_dashboard_url: str = "http://localhost:5173"
+    cors_extra_origins: str = ""
 
     poke_api_key: str = ""
     poke_webhook_url: str = "https://poke.com/api/v1/inbound/api-message"
