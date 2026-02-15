@@ -78,6 +78,14 @@ function DatabaseTopbar({ onRefresh }: { onRefresh: () => void }) {
 }
 
 export default function DatabasePage() {
+  return (
+    <React.Suspense fallback={<main className="min-h-screen" />}>
+      <DatabasePageInner />
+    </React.Suspense>
+  )
+}
+
+function DatabasePageInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const captureParam = searchParams.get('capture')
