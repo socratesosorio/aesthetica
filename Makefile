@@ -1,6 +1,6 @@
 COMPOSE=docker compose -f infra/docker-compose.yml
 
-.PHONY: dev down logs test embed-products reindex migrate seed
+.PHONY: dev down logs test embed-products reindex migrate seed ui ui-build ui-install
 
 dev:
 	$(COMPOSE) up --build
@@ -21,7 +21,16 @@ reindex:
 	$(COMPOSE) run --rm api curl -s -X POST http://api:8000/v1/internal/reindex-products -H "Authorization: Bearer dev"
 
 migrate:
-	$(COMPOSE) run --rm api alembic upgrade head
+	$(COMPOSE) run --rm api sh -lc "cd /app/services/api && alembic upgrade head"
 
 seed:
 	$(COMPOSE) run --rm api python /app/services/api/app/scripts/seed_demo.py
+
+ui-install:
+	cd apps/ui-aesthetica && pnpm install
+
+ui:
+	cd apps/ui-aesthetica && pnpm install && pnpm dev
+
+ui-build:
+	cd apps/ui-aesthetica && pnpm install && pnpm build

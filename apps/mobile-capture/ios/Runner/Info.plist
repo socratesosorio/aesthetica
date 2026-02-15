@@ -80,11 +80,11 @@
 	<key>MWDAT</key>
 	<dict>
 		<key>AppLinkURLScheme</key>
-		<string>aesthetica-mobile-capture</string>
+		<string>aesthetica-mobile-capture://</string>
 		<key>MetaAppID</key>
-		<string>YOUR_META_APP_ID</string>
+		<string>800697915646563</string>
 		<key>ClientToken</key>
-		<string>YOUR_META_CLIENT_TOKEN</string>
+		<string>AR|800697915646563|563f7fd89bbe4104a4bc760bd0aa26c8</string>
 		<key>TeamID</key>
 		<string>$(DEVELOPMENT_TEAM)</string>
 	</dict>

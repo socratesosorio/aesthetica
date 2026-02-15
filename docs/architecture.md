@@ -32,15 +32,51 @@
 - Local filesystem (or S3-compatible): processed image storage.
 - FAISS index files on disk under `data/faiss`.
 
+## Real-Time Video Streaming Pipeline
+
+In addition to single-capture mode, the system supports a live video streaming pipeline:
+
+1. Meta Ray-Ban DAT stream enters the companion app at 24 fps via `DatService`.
+2. `StreamRelayService` relays frames to backend over a WebSocket (`ws://.../v1/stream`).
+3. Client-side rate limiting drops excess frames (target ~10 fps to backend).
+4. Server `VideoStreamPipeline` ingests each JPEG frame:
+   - Decodes to grayscale thumbnail for fast perceptual comparison.
+   - `KeyframeSelector` decides whether the scene has changed enough (SSIM + pixel diff).
+   - Only keyframes (typically 1-3 per scene change) enter the ML processing buffer.
+5. Background processing thread runs `CapturePipeline.run()` on each keyframe.
+6. Results (garment detections, attributes) stream back via WebSocket.
+7. Mobile app renders live overlay chips on the camera preview.
+
+### Keyframe Selection Parameters
+
+| Parameter              | Default | Description                                  |
+|------------------------|---------|----------------------------------------------|
+| `ssim_threshold`       | 0.85    | SSIM above this ⇒ "same scene", skip.       |
+| `pixel_diff_threshold` | 0.06    | Mean absolute diff below this ⇒ skip.       |
+| `min_interval_s`       | 1.0     | Minimum seconds between keyframes.           |
+| `max_interval_s`       | 10.0    | Force keyframe after this many seconds.      |
+
+All parameters can be tuned live via the `configure` WebSocket command.
+
+### WebSocket Protocol
+
+- **Binary messages (client → server):** Raw JPEG frame bytes.
+- **Text/JSON (client → server):** `configure`, `ping`, `stats`, `stop`.
+- **Text/JSON (server → client):** `ack`, `result`, `stats`, `pong`, `error`.
+
 ## Performance Considerations
 
 - Lazy singleton model load in embedder.
 - FAISS index loaded once and reused.
-- Async processing via Celery to keep capture endpoint fast.
+- Async processing via Celery to keep single-capture endpoint fast.
 - Product embeddings precomputed by script.
+- Video stream pipeline: keyframe selection avoids redundant ML work (typically processes <5% of incoming frames).
+- WebSocket binary frames avoid HTTP overhead for continuous streaming.
+- Client-side frame dropping reduces bandwidth to ~10 fps.
 
 ## Privacy Constraints
 
 - Full scene frames are never persisted.
 - API stores only cropped/blurred images.
 - Safety blur pass runs server-side regardless of mobile blur.
+- Video stream frames are processed in-memory and never written to disk.
