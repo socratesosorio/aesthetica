@@ -53,7 +53,7 @@ The server runs on `http://localhost:8787/mcp`.
 
 1. Authenticate: `npx poke login`
 2. Start tunnel: `npx poke tunnel http://localhost:8787/mcp --name "Aesthetica Fashion AI"`
-3. Wait for "Tools synced" message — your 7 tools are now available to Poke.
+3. Wait for "Tools synced" message — your MCP tools are now available to Poke.
 
 ### Create a Recipe
 
@@ -67,13 +67,17 @@ The server runs on `http://localhost:8787/mcp`.
 
 | Tool | Description |
 |---|---|
-| `analyze_outfit` | Analyze an outfit image via URL |
-| `get_taste_profile` | Get 5-axis taste radar |
-| `get_radar_history` | Taste evolution over time |
-| `get_recent_looks` | Browse captured outfits |
-| `get_look_details` | Details + matches for a look |
-| `find_similar_products` | Search catalog by description |
-| `get_style_summary` | Natural language style summary |
+| `analyze_outfit` | Analyze outfit image URL (persistent, `mode=fast|full`) |
+| `find_similar_products` | Search local catalog + optional web results |
+| `get_style_scores` | Recent style score history and trend deltas |
+| `get_catalog_results` | Recent catalog analyses + concise product summaries |
+| `get_style_recommendations` | Style-driven shopping query + recommendation list |
+| `get_wardrobe_stats` | Aggregate scan and score statistics |
+| `get_my_style` | Compact style-identity snapshot |
+| `search_clothes` | Targeted shopping search |
+| `build_outfit` | Occasion-based outfit planning with links |
+
+All tools now return compact JSON payloads designed for LLM tool-use (instead of long prose blocks).
 
 ### Troubleshooting
 
