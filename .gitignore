@@ -29,5 +29,9 @@ data/faiss/*
 tests/web_detection/test_images/*
 !tests/web_detection/test_images/.gitkeep
 
+# Reports and results (generated, not committed)
+tests/web_detection/_reports/
+tests/web_detection/_results/
+
 # Logs
 *.log
