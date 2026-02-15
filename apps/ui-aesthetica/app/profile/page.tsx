@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { ChevronLeft, ChevronRight, Link2, Search, Sparkles, TrendingUp } from 'lucide-react'
 
+import { FashionIdentityTab } from '@/components/aesthetica/fashion-identity-tab'
 import { TasteRadar } from '@/components/aesthetica/taste-radar'
 import { CvBodyBoxes, type RegionLabel } from '@/components/dashboard/cv-body-boxes'
 import { Badge } from '@/components/ui/badge'
@@ -12,6 +13,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { sampleTasteRadar } from '@/lib/aesthetica/sample-data'
 import { cn } from '@/lib/utils'
 import {
@@ -21,7 +23,9 @@ import {
   getStoredToken,
   logout,
   mediaUrl,
+  type ApiCatalogRecommendationOut,
   type ApiCatalogRequestOut,
+  type ApiStyleRecommendationOut,
   type ApiStyleScoreOut,
 } from '@/lib/api'
 
@@ -60,6 +64,7 @@ type CheckedItem = ProductTile & {
 type CaptureRow = {
   id: string
   createdAtLabel: string
+  createdAtISO: string
   status: string
   imageUrl: string
   products: ProductTile[]
@@ -385,8 +390,11 @@ function ProfilePageInner() {
   const captureParam = searchParams.get('capture')
   const [query, setQuery] = React.useState('')
   const [recent, setRecent] = React.useState<CaptureRow[]>([])
+  const [catalogRequests, setCatalogRequests] = React.useState<ApiCatalogRequestOut[]>([])
   const [recommended, setRecommended] = React.useState<ProductTile[]>([])
+  const [catalogRecommendedRaw, setCatalogRecommendedRaw] = React.useState<ApiCatalogRecommendationOut[]>([])
   const [styleRecommended, setStyleRecommended] = React.useState<ProductTile[]>([])
+  const [styleRecommendedRaw, setStyleRecommendedRaw] = React.useState<ApiStyleRecommendationOut[]>([])
   const [tasteRadar, setTasteRadar] = React.useState(sampleTasteRadar)
   const [styleScores, setStyleScores] = React.useState<ApiStyleScoreOut[]>([])
   const [styleScoreDescription, setStyleScoreDescription] = React.useState<string | null>(null)
@@ -395,6 +403,7 @@ function ProfilePageInner() {
   const [selectedCaptureId, setSelectedCaptureId] = React.useState<string | null>(null)
   const [cvMode, setCvMode] = React.useState<'captures' | 'sample'>('captures')
   const [copiedCaptureId, setCopiedCaptureId] = React.useState<string | null>(null)
+  const [profileTab, setProfileTab] = React.useState<'profile' | 'fashion-identity'>('profile')
 
   const heroView = useInViewOnce<HTMLDivElement>(0.08)
   const recentView = useInViewOnce<HTMLDivElement>(0.1)
@@ -562,6 +571,7 @@ function ProfilePageInner() {
         return {
           id: req.id,
           createdAtLabel,
+          createdAtISO: req.created_at,
           status: req.pipeline_status,
           imageUrl: reqImage,
           products: [],
@@ -581,6 +591,9 @@ function ProfilePageInner() {
         if (reqObj && reqObj.image_path) extra = await buildRequestRow(reqObj)
       }
 
+      setCatalogRequests(reqs ?? [])
+      setCatalogRecommendedRaw(recs ?? [])
+      setStyleRecommendedRaw(styleRecs ?? [])
       setRecent(extra ? [extra, ...capRows] : capRows)
       setRecommended(
         (recs ?? []).map((r) => ({
@@ -738,11 +751,22 @@ function ProfilePageInner() {
           </p>
         </div>
 
+        <Tabs value={profileTab} onValueChange={(next) => setProfileTab(next as 'profile' | 'fashion-identity')} className="mt-8 w-full">
+          <TabsList className="h-10 rounded-full border border-border/50 bg-background/70 p-1">
+            <TabsTrigger value="profile" className="h-8 rounded-full px-4">
+              Profile
+            </TabsTrigger>
+            <TabsTrigger value="fashion-identity" className="h-8 rounded-full px-4">
+              Fashion Identity
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="profile" className="mt-4">
         {/* Top row: Last captured (CV body boxes) */}
         <Card
           ref={lastCapturedView.ref as any}
           className={cn(
-            'mt-8 overflow-hidden transition-[transform,box-shadow,opacity] duration-500 will-change-transform',
+            'mt-2 overflow-hidden transition-[transform,box-shadow,opacity] duration-500 will-change-transform',
             lastCapturedView.inView ? 'animate-reveal-up animation-delay-150' : 'opacity-0 motion-reduce:opacity-100',
             loading && 'opacity-90',
           )}
@@ -1096,9 +1120,20 @@ function ProfilePageInner() {
             </CardContent>
           </Card>
         </div>
+          </TabsContent>
+
+          <TabsContent value="fashion-identity" className="mt-4">
+            <FashionIdentityTab
+              loading={loading}
+              styleScores={styleScores}
+              captures={catalogRequests}
+              catalogRecommendations={catalogRecommendedRaw}
+              styleRecommendations={styleRecommendedRaw}
+            />
+          </TabsContent>
+        </Tabs>
 
       </div>
     </main>
   )
 }
-
