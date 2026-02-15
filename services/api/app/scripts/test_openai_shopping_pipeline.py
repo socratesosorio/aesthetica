@@ -10,11 +10,8 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-from app.services.catalog_from_image import CatalogConfig, _lens_to_shopping_context
-
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Smoke test the Lens -> Shopping path used for Poke context.")
+    parser = argparse.ArgumentParser(description="Smoke test the OpenAI -> Shopping path.")
     parser.add_argument("--image", required=True, help="Path to local image file.")
     parser.add_argument("--api-base", default="http://localhost:8001", help="Catalog API base URL.")
     parser.add_argument("--bucket", default=None, help="Supabase bucket name (default: env SUPABASE_STORAGE_BUCKET or captures).")
@@ -69,7 +66,7 @@ def main() -> int:
     supabase_url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
     bucket = (args.bucket or os.getenv("SUPABASE_STORAGE_BUCKET") or "captures").strip()
     if not supabase_url:
-        print("error: SUPABASE_URL not set; cannot verify lens image URL", file=sys.stderr)
+        print("error: SUPABASE_URL not set; cannot verify capture image URL", file=sys.stderr)
         return 2
 
     ext = _ext_for(image_path, content_type)
@@ -82,18 +79,12 @@ def main() -> int:
     print(f"capture_blob_status: {status}")
     print(f"capture_blob_url: {image_url}")
 
-    cfg = CatalogConfig()
-    ctx = _lens_to_shopping_context(image_url, cfg)
-    desc = ctx.get("description")
-    base_desc = ctx.get("base_description")
-    refined_desc = ctx.get("refined_description")
-    shopping = ctx.get("shopping") or []
-    print("\nLens -> Shopping context:")
-    print(f"base_description: {base_desc}")
-    print(f"refined_description: {refined_desc}")
-    print(f"normalized_description: {desc}")
-    print(f"shopping_count: {len(shopping)}")
-    for idx, row in enumerate(shopping[:5], start=1):
+    recs = payload.get("recommendations") or []
+    query_used = recs[0].get("query_used") if recs else None
+    print("\nOpenAI -> Shopping context:")
+    print(f"query_used: {query_used}")
+    print(f"recommendation_count: {len(recs)}")
+    for idx, row in enumerate(recs[:5], start=1):
         title = row.get("title")
         price = row.get("price_text")
         source = row.get("source")

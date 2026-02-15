@@ -93,7 +93,7 @@ Dev notes for DAT integration:
 - Source CSV: `data/products.csv`
 - Embedding script: `services/ml/scripts/embed_products.py`
 - FAISS output: `data/faiss/*.index` and `data/faiss/*_mapping.json`
-- Open-web match fallback: SerpAPI Google Shopping (+ optional Google Lens when public image URLs are available)
+- Open-web match fallback: SerpAPI Google Shopping
 
 ## Environment Variables
 
@@ -189,20 +189,20 @@ curl -s http://localhost:8001/healthz
 curl -s http://localhost:8001/readyz
 ```
 
-### Lens -> Shopping Smoke Test (No Integration Suite Required)
+### OpenAI -> Shopping Smoke Test (No Integration Suite Required)
 
 This script runs a real image through:
 1. `POST /v1/catalog/from-image`
 2. Supabase capture upload URL check
-3. Serp Google Lens on that uploaded image
-4. OpenAI `gpt-5.2` refinement (image + Lens normalized text) to remove non-clothing terms
-5. Serp Google Shopping using the refined clothing-only description
+3. OpenAI image analysis for clothing description + brand/color/style cues
+4. OpenAI query builder for shopping retrieval
+5. Serp Google Shopping using the OpenAI-built query
 
 Run from repo root:
 
 ```bash
 docker compose -f infra/docker-compose.yml run --rm api \
-  python services/api/app/scripts/test_lens_shopping_pipeline.py \
+  python services/api/app/scripts/test_openai_shopping_pipeline.py \
   --image apps/ui-aesthetica/public/images/outfit-1.png \
   --api-base http://catalog-api:8000
 ```
@@ -210,15 +210,13 @@ docker compose -f infra/docker-compose.yml run --rm api \
 Or use Make:
 
 ```bash
-make test-lens-shopping
+make test-openai-shopping
 # custom image:
-make test-lens-shopping LENS_TEST_IMAGE=apps/ui-aesthetica/public/images/outfit-9.png
+make test-openai-shopping OPENAI_TEST_IMAGE=apps/ui-aesthetica/public/images/outfit-9.png
 ```
 
 The script prints:
 - `request_id`
 - `capture_blob_url` + HTTP status
-- `base_description` (raw Lens-normalized text)
-- `refined_description` (OpenAI 5.2 cleaned clothing-only text)
-- `normalized_description` (final query used for shopping)
-- top Shopping results used by the Lens -> Shopping path
+- `query_used` (final OpenAI-built query used for shopping)
+- top Shopping results returned by the API
