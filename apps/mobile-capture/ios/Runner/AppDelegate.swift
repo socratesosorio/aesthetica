@@ -397,8 +397,10 @@ private final class MetaDatProvider: DatFrameProvider {
   var onPreviewFrame: ((Data) -> Void)?
   var onCapturedPhoto: ((Data) -> Void)?
 
-  private let wearables: WearablesInterface = Wearables.shared
+  private lazy var wearables: WearablesInterface = Wearables.shared
   private var streamSession: StreamSession?
+  private var deviceSelector: AutoDeviceSelector?
+  private var deviceMonitorTask: Task<Void, Never>?
 
   private var stateListenerToken: AnyListenerToken?
   private var videoFrameListenerToken: AnyListenerToken?
@@ -406,6 +408,8 @@ private final class MetaDatProvider: DatFrameProvider {
   private var photoDataListenerToken: AnyListenerToken?
 
   private var configured = false
+  private var currentStreamState: String = "none"
+  private var frameCount: Int = 0
 
   func initialize(completion: @escaping (Result<Void, Error>) -> Void) {
     do {
@@ -422,10 +426,79 @@ private final class MetaDatProvider: DatFrameProvider {
   func requestCameraPermission(completion: @escaping (Result<Void, Error>) -> Void) {
     Task {
       do {
+        // Step 1: Register with the Meta AI app if not already registered.
+        let regState = wearables.registrationState
+        NSLog("[Aesthetica][DAT] Current registration state: \(regState)")
+
+        if regState != .registered {
+          NSLog("[Aesthetica][DAT] Starting registration flow (will open Meta AI app)...")
+          try await wearables.startRegistration()
+          NSLog("[Aesthetica][DAT] startRegistration() returned, waiting for state...")
+
+          // Wait for the registration state to settle after the
+          // Meta AI app redirects back.
+          for await state in wearables.registrationStateStream() {
+            NSLog("[Aesthetica][DAT] Registration state update: \(state)")
+            if state == .registered { break }
+            if state == .unavailable {
+              throw DatBridgeError.unavailable("Registration failed — glasses not available")
+            }
+          }
+        }
+
+        NSLog("[Aesthetica][DAT] Registered. Waiting for glasses to connect...")
+
+        // Step 2: Wait for a device (glasses) to become available.
+        // The official Meta sample waits for activeDeviceStream() before
+        // requesting permission. Without a connected device the permission
+        // request fails with PermissionError 0.
+        let selector = AutoDeviceSelector(wearables: wearables)
+        var deviceFound = false
+        let timeout: UInt64 = 30_000_000_000 // 30 seconds in nanoseconds
+
+        // Race between device appearing and a timeout
+        try await withThrowingTaskGroup(of: Bool.self) { group in
+          group.addTask {
+            for await device in selector.activeDeviceStream() {
+              if device != nil {
+                NSLog("[Aesthetica][DAT] Device found: \(String(describing: device))")
+                return true
+              }
+            }
+            return false
+          }
+          group.addTask {
+            try await Task.sleep(nanoseconds: timeout)
+            return false
+          }
+
+          if let result = try await group.next() {
+            deviceFound = result
+          }
+          group.cancelAll()
+        }
+
+        if !deviceFound {
+          // Also check the current devices list in case it was already there.
+          if wearables.devices.isEmpty {
+            NSLog("[Aesthetica][DAT] No device found after 30s timeout.")
+            throw DatBridgeError.unavailable(
+              "No glasses found. Make sure your Ray-Bans are on, charged, and connected in the Meta AI app."
+            )
+          }
+          NSLog("[Aesthetica][DAT] Device already in devices list, continuing.")
+        }
+
+        NSLog("[Aesthetica][DAT] Device available. Requesting camera permission...")
+
+        // Step 3: Request camera permission (now that a device is connected).
         let permission = Permission.camera
         var status = try await wearables.checkPermissionStatus(permission)
+        NSLog("[Aesthetica][DAT] Camera permission status: \(status)")
+
         if status != .granted {
           status = try await wearables.requestPermission(permission)
+          NSLog("[Aesthetica][DAT] Camera permission after request: \(status)")
         }
 
         if status == .granted {
@@ -434,6 +507,7 @@ private final class MetaDatProvider: DatFrameProvider {
           completion(.failure(DatBridgeError.permissionDenied))
         }
       } catch {
+        NSLog("[Aesthetica][DAT] Permission flow error: \(error)")
         completion(.failure(error))
       }
     }
@@ -457,33 +531,77 @@ private final class MetaDatProvider: DatFrameProvider {
       frameRate: safeFps
     )
 
-    let selector = AutoDeviceSelector(wearables: wearables)
-    let session = StreamSession(streamSessionConfig: sessionConfig, deviceSelector: selector)
+    NSLog("[Aesthetica][DAT] Creating stream session: resolution=\(resolution), fps=\(safeFps)")
 
-    stateListenerToken = session.statePublisher.listen { _ in }
+    Task { @MainActor in
+      // Retain the selector as an instance property (matches official sample).
+      let selector = AutoDeviceSelector(wearables: wearables)
+      self.deviceSelector = selector
 
-    videoFrameListenerToken = session.videoFramePublisher.listen { [weak self] frame in
-      guard let image = frame.makeUIImage() else {
-        return
+      let session = StreamSession(streamSessionConfig: sessionConfig, deviceSelector: selector)
+
+      // Monitor device availability (matches official sample pattern).
+      self.deviceMonitorTask?.cancel()
+      self.deviceMonitorTask = Task { @MainActor in
+        for await device in selector.activeDeviceStream() {
+          NSLog("[Aesthetica][DAT] Active device changed: \(device != nil ? "connected" : "none")")
+        }
       }
-      guard let data = image.jpegData(compressionQuality: 0.72) else {
-        return
+
+      // State listener — dispatch back to MainActor (matches official sample).
+      stateListenerToken = session.statePublisher.listen { [weak self] state in
+        Task { @MainActor [weak self] in
+          self?.currentStreamState = "\(state)"
+          NSLog("[Aesthetica][DAT] Stream session state → \(state)")
+        }
       }
-      self?.onPreviewFrame?(data)
-    }
 
-    photoDataListenerToken = session.photoDataPublisher.listen { [weak self] photoData in
-      self?.onCapturedPhoto?(photoData.data)
-    }
+      // Video frame listener.
+      videoFrameListenerToken = session.videoFramePublisher.listen { [weak self] frame in
+        Task { @MainActor [weak self] in
+          guard let self else { return }
+          self.frameCount += 1
+          if self.frameCount == 1 {
+            NSLog("[Aesthetica][DAT] First video frame received!")
+          }
+          if self.frameCount % 100 == 0 {
+            NSLog("[Aesthetica][DAT] Received \(self.frameCount) frames, state=\(self.currentStreamState)")
+          }
+          guard let image = frame.makeUIImage() else { return }
+          guard let data = image.jpegData(compressionQuality: 0.72) else { return }
+          self.onPreviewFrame?(data)
+        }
+      }
 
-    errorListenerToken = session.errorPublisher.listen { error in
-      NSLog("[Aesthetica][DAT] Stream error: \(error)")
-    }
+      // Error listener.
+      errorListenerToken = session.errorPublisher.listen { error in
+        Task { @MainActor in
+          NSLog("[Aesthetica][DAT] Stream error: \(error)")
+        }
+      }
 
-    streamSession = session
+      // Photo capture listener (fires for BOTH hardware button and programmatic capturePhoto).
+      // This MUST be set up and the token retained for the lifetime of the session.
+      photoDataListenerToken = session.photoDataPublisher.listen { [weak self] photoData in
+        Task { @MainActor [weak self] in
+          guard let self else { return }
+          NSLog("[Aesthetica][DAT] ★ PHOTO RECEIVED ★ size=\(photoData.data.count) bytes, streamState=\(self.currentStreamState)")
+          self.onCapturedPhoto?(photoData.data)
+        }
+      }
 
-    Task {
+      NSLog("[Aesthetica][DAT] All listeners attached. photoDataListenerToken is \(photoDataListenerToken == nil ? "nil ⚠️" : "set ✓")")
+
+      streamSession = session
+
+      // Log initial state before starting.
+      NSLog("[Aesthetica][DAT] Session initial state: \(session.state)")
+      NSLog("[Aesthetica][DAT] Current devices: \(wearables.devices)")
+      NSLog("[Aesthetica][DAT] Starting stream session...")
+
       await session.start()
+
+      NSLog("[Aesthetica][DAT] Stream session started. state=\(session.state)")
       completion(.success(()))
     }
   }
@@ -494,24 +612,36 @@ private final class MetaDatProvider: DatFrameProvider {
       return
     }
 
-    Task {
+    Task { @MainActor in
       await session.stop()
+      deviceMonitorTask?.cancel()
+      deviceMonitorTask = nil
       streamSession = nil
+      deviceSelector = nil
       stateListenerToken = nil
       videoFrameListenerToken = nil
       photoDataListenerToken = nil
       errorListenerToken = nil
+      frameCount = 0
+      currentStreamState = "stopped"
+      NSLog("[Aesthetica][DAT] Stream session stopped and cleaned up.")
       completion(.success(()))
     }
   }
 
   func capturePhoto(completion: @escaping (Result<Void, Error>) -> Void) {
+    NSLog("[Aesthetica][DAT] capturePhoto() called. streamSession=\(streamSession == nil ? "nil ⚠️" : "exists"), state=\(currentStreamState), frames=\(frameCount)")
     guard let session = streamSession else {
+      NSLog("[Aesthetica][DAT] capturePhoto() FAILED: no active session")
       completion(.failure(DatBridgeError.notInitialized))
       return
     }
-    session.capturePhoto(format: .jpeg)
-    completion(.success(()))
+    Task { @MainActor in
+      NSLog("[Aesthetica][DAT] Calling session.capturePhoto(format: .jpeg)...")
+      session.capturePhoto(format: .jpeg)
+      NSLog("[Aesthetica][DAT] session.capturePhoto() returned")
+      completion(.success(()))
+    }
   }
 
   func handleOpenURL(_ url: URL) -> Bool {

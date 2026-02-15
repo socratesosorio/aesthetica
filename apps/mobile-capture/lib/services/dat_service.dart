@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Abstraction for Meta Wearables DAT camera stream.
@@ -47,35 +48,62 @@ class RealDatService implements DatService {
 
   @override
   Future<void> initialize() async {
-    await _method.invokeMethod('initializeSdk');
+    try {
+      debugPrint('[DAT] Calling initializeSdk...');
+      await _method.invokeMethod('initializeSdk');
+      debugPrint('[DAT] initializeSdk succeeded.');
+    } catch (e) {
+      debugPrint('[DAT] initializeSdk FAILED: $e');
+      rethrow;
+    }
 
-    _frameSubscription = _frameEvents.receiveBroadcastStream().listen((event) {
-      final bytes = _asBytes(event);
-      if (bytes == null) return;
-      _latest = bytes;
-      _frameController.add(bytes);
-    });
+    _frameSubscription = _frameEvents.receiveBroadcastStream().listen(
+      (event) {
+        final bytes = _asBytes(event);
+        if (bytes == null) return;
+        _latest = bytes;
+        _frameController.add(bytes);
+      },
+      onError: (e) => debugPrint('[DAT] Frame stream error: $e'),
+    );
 
-    _photoSubscription = _photoEvents.receiveBroadcastStream().listen((event) {
-      final bytes = _asBytes(event);
-      if (bytes == null) return;
-      _photoController.add(bytes);
-    });
+    _photoSubscription = _photoEvents.receiveBroadcastStream().listen(
+      (event) {
+        final bytes = _asBytes(event);
+        if (bytes == null) return;
+        _photoController.add(bytes);
+      },
+      onError: (e) => debugPrint('[DAT] Photo stream error: $e'),
+    );
   }
 
   @override
   Future<void> requestCameraPermission() async {
-    await _method.invokeMethod('requestCameraPermission');
+    try {
+      debugPrint('[DAT] Requesting camera permission...');
+      await _method.invokeMethod('requestCameraPermission');
+      debugPrint('[DAT] Camera permission granted.');
+    } catch (e) {
+      debugPrint('[DAT] Camera permission FAILED: $e');
+      rethrow;
+    }
   }
 
   @override
   Future<void> startStream(
       {int width = 1280, int height = 720, int fps = 30}) async {
-    await _method.invokeMethod('startVideoStream', {
-      'width': width,
-      'height': height,
-      'fps': fps,
-    });
+    try {
+      debugPrint('[DAT] Starting video stream ${width}x$height @${fps}fps...');
+      await _method.invokeMethod('startVideoStream', {
+        'width': width,
+        'height': height,
+        'fps': fps,
+      });
+      debugPrint('[DAT] Video stream started.');
+    } catch (e) {
+      debugPrint('[DAT] startVideoStream FAILED: $e');
+      rethrow;
+    }
   }
 
   @override

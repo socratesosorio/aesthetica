@@ -38,5 +38,30 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    # ── Xcode 26 beta workaround ──
+    # Xcode 26 changed C module handling. Pods that set -std=c99 (e.g. nanopb,
+    # GoogleDataTransport) cause PCH mismatch with the Swift toolchain's gnu17.
+    # Fix: force gnu17, disable explicit modules, and strip c99 flags.
+    target.build_configurations.each do |config|
+      # Force C standard to gnu17 to match Xcode 26 Swift toolchain expectation.
+      config.build_settings['GCC_C_LANGUAGE_STANDARD'] = 'gnu17'
+
+      # Disable explicit modules (broken with Xcode 26 beta SDK).
+      config.build_settings['SWIFT_ENABLE_EXPLICIT_MODULES'] = 'NO'
+      config.build_settings['CLANG_ENABLE_EXPLICIT_MODULES'] = 'NO'
+
+      # Strip any -std=c99 flags that pods inject via OTHER_CFLAGS.
+      if config.build_settings['OTHER_CFLAGS']
+        if config.build_settings['OTHER_CFLAGS'].is_a?(Array)
+          config.build_settings['OTHER_CFLAGS'].reject! { |f| f =~ /-std=c99/ }
+        elsif config.build_settings['OTHER_CFLAGS'].is_a?(String)
+          config.build_settings['OTHER_CFLAGS'] = config.build_settings['OTHER_CFLAGS'].gsub(/-std=c99/, '')
+        end
+      end
+
+      config.build_settings['OTHER_SWIFT_FLAGS'] ||= ['$(inherited)']
+      config.build_settings['OTHER_SWIFT_FLAGS'] << '-no-verify-emitted-module-interface'
+    end
   end
 end
