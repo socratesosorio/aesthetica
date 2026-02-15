@@ -40,6 +40,8 @@ def process_catalog_from_image(
 ) -> CatalogFromImageResponse:
     cfg = config or CatalogConfig()
     top_k = max(1, min(cfg.top_k, 5))
+    logger.info("[CATALOG] ── START ── file=%s, content_type=%s, size=%d bytes, top_k=%d",
+                filename, content_type, len(image_bytes), top_k)
     req = CatalogRequest(
         original_filename=_clip(filename, 255),
         original_content_type=_clip(content_type, 128),
@@ -49,23 +51,30 @@ def process_catalog_from_image(
     db.add(req)
     db.commit()
     db.refresh(req)
+    logger.info("[CATALOG] Created request id=%s", req.id)
 
-    uploaded_public_url: str | None = None
     upload_error: str | None = None
     try:
-        upload_res = upload_catalog_input_image(
+        result = upload_catalog_input_image(
             request_id=req.id,
             image_bytes=image_bytes,
             content_type=content_type,
             filename=filename,
         )
-        if upload_res is not None:
-            uploaded_public_url = upload_res.public_url
+        if result and result.public_url:
+            logger.info("Image uploaded: %s", result.public_url)
     except Exception as exc:
         upload_error = f"{type(exc).__name__}: {exc}"
+        logger.warning("Image upload failed: %s", upload_error)
 
     try:
+        # 1. Classify the garment (style scores + garment_name).
         style_signal = _analyze_style_openai(image_bytes, cfg)
+        logger.info(
+            "[CATALOG] style_signal: garment_name=%s, description=%s",
+            style_signal.get("garment_name"),
+            (style_signal.get("description") or "")[:120],
+        )
         style_row = StyleScore(
             request_id=req.id,
             image_bytes=image_bytes,
@@ -79,12 +88,16 @@ def process_catalog_from_image(
         db.add(style_row)
         db.commit()
 
-        style_ctx = _last_style_context(db, limit=5)
-        reco_ctx = _style_recommendation_prompt(style_ctx, cfg)
+        reco_ctx = _openai_shopping_query(image_bytes=image_bytes, current_style=style_signal, cfg=cfg)
         style_matches = _search_serp(reco_ctx["search_query"], cfg, max_results=max(10, top_k))
-        style_ranked = _rank_style_matches(reco_ctx["search_query"], style_matches)[:top_k]
+        ranked = _rank_style_matches(reco_ctx["search_query"], style_matches)[:top_k]
+        search_query = reco_ctx["search_query"]
+        rationale = reco_ctx.get("rationale") or "openai primary query"
+        logger.info("[CATALOG] OpenAI query='%s' returned %d results", search_query, len(ranked))
+
+        # Catalog recommendations (app response): use ranked (Lens or style fallback).
         rows: list[CatalogRecommendation] = []
-        for idx, m in enumerate(style_ranked, start=1):
+        for idx, m in enumerate(ranked, start=1):
             cat_row = CatalogRecommendation(
                 request_id=req.id,
                 rank=idx,
@@ -93,12 +106,17 @@ def process_catalog_from_image(
                 source=_clip(m.get("source"), 255),
                 price_text=_clip(m.get("price_text"), 128),
                 price_value=m.get("price_value"),
-                query_used=_clip(reco_ctx["search_query"], 2000),
+                query_used=_clip(search_query, 2000),
                 recommendation_image_url=_clip(m.get("image_url"), 2048),
                 recommendation_image_bytes=_download_image_bytes(m.get("image_url"), cfg.rec_image_timeout_sec),
             )
             rows.append(cat_row)
             db.add(cat_row)
+
+        # Style recommendations mirror the same primary OpenAI query results.
+        style_query = reco_ctx["search_query"]
+        style_rationale = reco_ctx.get("rationale") or "openai primary query"
+        for idx, m in enumerate(ranked, start=1):
             db.add(
                 StyleRecommendation(
                     request_id=req.id,
@@ -108,10 +126,10 @@ def process_catalog_from_image(
                     source=_clip(m.get("source"), 255),
                     price_text=_clip(m.get("price_text"), 128),
                     price_value=m.get("price_value"),
-                    query_used=_clip(reco_ctx["search_query"], 2000),
+                    query_used=_clip(style_query, 2000),
                     recommendation_image_url=_clip(m.get("image_url"), 2048),
                     recommendation_image_bytes=_download_image_bytes(m.get("image_url"), cfg.rec_image_timeout_sec),
-                    rationale=_clip(reco_ctx["rationale"], 4000),
+                    rationale=_clip(style_rationale, 4000),
                 )
             )
         req.pipeline_status = "ok" if rows else "no_products_found"
@@ -122,9 +140,26 @@ def process_catalog_from_image(
             req.error = f"supabase_storage_upload_error: {upload_error}"
         db.commit()
         db.refresh(req)
-        _notify_poke(style_signal, style_ranked, input_image_url=uploaded_public_url, request_id=req.id, cfg=cfg)
+        logger.info(
+            "[CATALOG] ── DONE ── id=%s, status=%s, garment=%s, brand=%s, confidence=%.2f, "
+            "results=%d, query='%s', source=%s",
+            req.id, req.pipeline_status, req.garment_name, req.brand_hint,
+            req.confidence, len(rows), search_query,
+            "openai_primary",
+        )
+        for r in rows:
+            logger.info("[CATALOG]   #%d: %s | %s | %s", r.rank, r.title[:80], r.price_text, r.source)
+
+        # 5. Notify Poke using the same OpenAI-primary context.
+        _notify_poke(
+            style_signal, ranked,
+            request_id=req.id,
+            query_used=search_query,
+            cfg=cfg,
+        )
         return _to_response(req, rows)
     except Exception as exc:
+        logger.exception("[CATALOG] ── FAILED ── id=%s, error=%s", req.id, exc)
         req.pipeline_status = "pipeline_error"
         req.error = f"{type(exc).__name__}: {exc}"
         if upload_error:
@@ -137,46 +172,40 @@ def process_catalog_from_image(
 def _notify_poke(
     signal: dict[str, Any],
     ranked: list[dict[str, Any]],
-    input_image_url: str | None = None,
-    request_id: int | None = None,
+    request_id: str | None = None,
+    query_used: str | None = None,
     cfg: CatalogConfig | None = None,
 ) -> None:
     """Send a vibey AI-generated message to Poke about what the user just captured."""
     try:
+        del cfg
         from app.core.config import settings
 
         garment = signal.get("garment_name") or "fit"
         brand = signal.get("brand_hint")
+        color = signal.get("color_hint")
+        style_tags = signal.get("style_tags") or []
         details = f"garment: {garment}"
         if brand:
             details += f", brand: {brand}"
-        lens_top: dict[str, Any] | None = None
-        if input_image_url:
-            lens_ctx = _lens_to_shopping_context(input_image_url, cfg or CatalogConfig())
-            if lens_ctx.get("description"):
-                details = str(lens_ctx["description"])
-            if lens_ctx.get("shopping"):
-                lens_top = lens_ctx["shopping"][0]
+        if color:
+            details += f", color: {color}"
+        if style_tags:
+            details += f", style: {', '.join(style_tags[:3])}"
+        if query_used:
+            details += f", query: {query_used}"
 
         product_url = None
         image_url = None
         top_match = ""
-        if lens_top:
-            top_match = f"Top match: {lens_top.get('title', '')}"
-            if lens_top.get("price_text"):
-                top_match += f" ({lens_top.get('price_text')})"
-            product_url = lens_top.get("product_url")
-            image_url = lens_top.get("image_url")
-        elif ranked:
-            top = ranked[0]
-            top_match = f"Top match: {top.get('title', '')}"
-            if top.get("price_text"):
-                top_match += f" ({top.get('price_text')})"
-            product_url = top.get("product_url")
-            image_url = top.get("image_url")
-            if len(ranked) > 1:
-                top_match += f"\n+ {len(ranked) - 1} more options saved"
-
+        top_result = ranked[0] if ranked else None
+        if top_result:
+            top_match = f"Top match: {top_result.get('title', '')}"
+            if top_result.get("price_text"):
+                top_match += f" ({top_result.get('price_text')})"
+            image_url = top_result.get("image_url")
+            if top_result.get("product_url"):
+                top_match += f"\n{top_result.get('product_url')}"
         # Prefer our own dashboard link over the raw external product URL
         link = None
         if request_id:
@@ -201,63 +230,62 @@ def _notify_poke(
         logger.exception("poke_notify_failed")
 
 
-def _lens_to_shopping_context(image_url: str, cfg: CatalogConfig) -> dict[str, Any]:
-    api_key = os.getenv("SERPAPI_API_KEY")
+def _openai_shopping_query(image_bytes: bytes, current_style: dict[str, Any], cfg: CatalogConfig) -> dict[str, str]:
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        return {}
-    lens_params = {
-        "engine": "google_lens",
-        "url": image_url,
-        "api_key": api_key,
-        "hl": "en",
-        "gl": "us",
-    }
+        return {
+            "search_query": _clean(current_style.get("description")) or _clean(current_style.get("garment_name")) or "shirt",
+            "rationale": "openai key missing; using style description fallback",
+        }
+
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    url = _to_data_url(img)
+    system = (
+        "Return strict JSON with keys: search_query (string), rationale (string). "
+        "Build the most accurate shopping query for the main visible clothing item. "
+        "Prioritize brand, color, garment type, and style. "
+        "Exclude non-clothing terms."
+    )
+    user_text = (
+        "Use the image as primary truth. "
+        f"Current style signal: {json.dumps(current_style)}. "
+        "Return a concise query suitable for Google Shopping."
+    )
     try:
-        resp = requests.get("https://serpapi.com/search.json", params=lens_params, timeout=cfg.serp_timeout_sec)
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": cfg.openai_model,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_text},
+                            {"type": "image_url", "image_url": {"url": url}},
+                        ],
+                    },
+                ],
+                "temperature": 0.1,
+            },
+            timeout=cfg.openai_timeout_sec,
+        )
         resp.raise_for_status()
-        lens_data = resp.json()
-    except Exception:
-        return {}
+        parsed = json.loads(resp.json()["choices"][0]["message"]["content"])
+        query = _clean(parsed.get("search_query"))
+        rationale = _clean(parsed.get("rationale"))
+    except Exception as exc:
+        logger.warning("openai_query_generation_failed: %s", exc)
+        query = None
+        rationale = None
 
-    visual = lens_data.get("visual_matches") or []
-    best = visual[0] if visual else {}
-    print(best)
-    best_title = _clean(best.get("title")) or _clean(lens_data.get("search_metadata", {}).get("status")) or "clothing item"
-    source = _clean(best.get("source"))
-    normalized = _normalize_lens_description(best_title, source)
-    shopping = _search_serp(normalized, cfg, max_results=5)
-    return {"description": normalized, "shopping": shopping}
-
-
-def _normalize_lens_description(title: str, source: str | None) -> str:
-    text = re.sub(r"[\[\]\(\)\|]+", " ", title).strip()
-    text = re.sub(r"\s+", " ", text)
-    tokens = _tokens(text)
-    keep: list[str] = []
-    drop = {
-        "buy",
-        "sale",
-        "shop",
-        "new",
-        "mens",
-        "womens",
-        "women",
-        "men",
-        "official",
-        "store",
-        "free",
-        "shipping",
+    fallback = _clean(current_style.get("description")) or _clean(current_style.get("garment_name")) or "shirt"
+    return {
+        "search_query": query or fallback,
+        "rationale": rationale or "OpenAI image-grounded query from color/style/brand cues.",
     }
-    for t in tokens:
-        if t in drop:
-            continue
-        if len(keep) >= 8:
-            break
-        keep.append(t)
-    normalized = " ".join(keep).strip()
-    if source and source.lower() not in normalized.lower():
-        normalized = f"{source} {normalized}".strip()
-    return normalized or text or "clothing item"
 
 
 def _generate_poke_opener(garment_details: str) -> str:
@@ -353,6 +381,7 @@ def _search_serp(query: str, cfg: CatalogConfig, max_results: int) -> list[dict[
     api_key = os.getenv("SERPAPI_API_KEY")
     if not api_key:
         raise RuntimeError("SERPAPI_API_KEY is required")
+    logger.info("[SERP] Searching Google Shopping: q='%s', max=%d", query, max_results)
     params = {
         "engine": "google_shopping",
         "q": query,
@@ -364,6 +393,9 @@ def _search_serp(query: str, cfg: CatalogConfig, max_results: int) -> list[dict[
     resp = requests.get("https://serpapi.com/search.json", params=params, timeout=cfg.serp_timeout_sec)
     resp.raise_for_status()
     data = resp.json()
+    logger.info("[SERP] Response: %d shopping_results, search_id=%s",
+                len(data.get("shopping_results", [])),
+                data.get("search_metadata", {}).get("id", "?"))
     out: list[dict[str, Any]] = []
     for row in data.get("shopping_results", []):
         link = row.get("product_link") or row.get("link")
@@ -393,8 +425,9 @@ def _analyze_style_openai(image_bytes: bytes, cfg: CatalogConfig) -> dict[str, A
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     system = (
         "Return strict JSON with keys: description (string), garment_name (string), brand_hint (string|null), "
-        "confidence (0-1), casual (0-100), minimal (0-100), structured (0-100), classic (0-100), neutral (0-100). "
-        "Description should be concise, focused on clothing attributes only."
+        "color_hint (string|null), style_tags (array of strings), confidence (0-1), "
+        "casual (0-100), minimal (0-100), structured (0-100), classic (0-100), neutral (0-100). "
+        "Focus on the primary visible clothing item only."
     )
     body = {
         "model": cfg.openai_model,
@@ -404,7 +437,13 @@ def _analyze_style_openai(image_bytes: bytes, cfg: CatalogConfig) -> dict[str, A
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe the outfit and score the 5 style attributes from 0 to 100."},
+                    {
+                        "type": "text",
+                        "text": (
+                            "Describe the main clothing item with high accuracy for shopping retrieval. "
+                            "Include color, likely brand/logo text if visible, and style cues."
+                        ),
+                    },
                     {"type": "image_url", "image_url": {"url": url}},
                 ],
             },
@@ -423,68 +462,14 @@ def _analyze_style_openai(image_bytes: bytes, cfg: CatalogConfig) -> dict[str, A
         "description": _clean(parsed.get("description")) or "No description",
         "garment_name": _clean(parsed.get("garment_name")) or "shirt",
         "brand_hint": _clean(parsed.get("brand_hint")),
+        "color_hint": _clean(parsed.get("color_hint")),
+        "style_tags": [str(x).strip() for x in parsed.get("style_tags", []) if str(x).strip()],
         "confidence": max(0.0, min(1.0, float(parsed.get("confidence", 0.7)))),
         "casual": parsed.get("casual", 50),
         "minimal": parsed.get("minimal", 50),
         "structured": parsed.get("structured", 50),
         "classic": parsed.get("classic", 50),
         "neutral": parsed.get("neutral", 50),
-    }
-
-
-def _last_style_context(db: Session, limit: int = 5) -> dict[str, Any]:
-    rows = db.query(StyleScore).order_by(StyleScore.created_at.desc()).limit(max(1, limit)).all()
-    if not rows:
-        return {
-            "avg": {"casual": 50.0, "minimal": 50.0, "structured": 50.0, "classic": 50.0, "neutral": 50.0},
-            "descriptions": [],
-        }
-    n = float(len(rows))
-    avg = {
-        "casual": sum(float(r.casual) for r in rows) / n,
-        "minimal": sum(float(r.minimal) for r in rows) / n,
-        "structured": sum(float(r.structured) for r in rows) / n,
-        "classic": sum(float(r.classic) for r in rows) / n,
-        "neutral": sum(float(r.neutral) for r in rows) / n,
-    }
-    descriptions = [r.description for r in reversed(rows)]
-    return {"avg": avg, "descriptions": descriptions}
-
-
-def _style_recommendation_prompt(style_ctx: dict[str, Any], cfg: CatalogConfig) -> dict[str, str]:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required")
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    system = (
-        "Return strict JSON with keys: search_query (string), rationale (string). "
-        "search_query should be a concise shopping query for similar clothing items."
-    )
-    user_text = (
-        f"Average scores: {json.dumps(style_ctx.get('avg', {}))}. "
-        f"Last descriptions: {json.dumps(style_ctx.get('descriptions', []))}. "
-        "Recommend similar clothing to search for."
-    )
-    body = {
-        "model": cfg.openai_model,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_text},
-        ],
-        "temperature": 0.2,
-    }
-    resp = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers=headers,
-        json=body,
-        timeout=cfg.openai_timeout_sec,
-    )
-    resp.raise_for_status()
-    parsed = json.loads(resp.json()["choices"][0]["message"]["content"])
-    return {
-        "search_query": _clean(parsed.get("search_query")) or "minimal classic casual neutral clothing",
-        "rationale": _clean(parsed.get("rationale")) or "Recommended from score and description profile.",
     }
 
 

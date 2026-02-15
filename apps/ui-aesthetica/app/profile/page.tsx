@@ -363,9 +363,6 @@ function ProfileTopbar({
             <Link href="/">Back to landing</Link>
           </Button>
           <Button asChild size="sm" variant="outline" className="h-9">
-            <Link href="/database">Database</Link>
-          </Button>
-          <Button asChild size="sm" variant="outline" className="h-9">
             <Link href="/logout">Log out</Link>
           </Button>
         </div>
@@ -467,10 +464,12 @@ function ProfilePageInner() {
         router.replace(`/login?next=${encodeURIComponent(next)}`)
         return
       }
+      // Keep a stable narrowed string token for nested functions.
+      const authToken = token
 
       let me: { id: string } | null = null
       try {
-        me = await api.me(token, ctrl.signal)
+        me = await api.me(authToken, ctrl.signal)
       } catch (err) {
         // Abort == navigation/unmount; don't treat as auth failure.
         if (err && typeof err === 'object' && 'name' in err && (err as any).name === 'AbortError') return
@@ -489,11 +488,11 @@ function ProfilePageInner() {
       }
 
       const [reqs, recs, styleRecs, scores, profile] = await Promise.all([
-        api.catalogRequests(token, 60, ctrl.signal).catch(() => []),
-        api.catalogRecommendations(token, 24, ctrl.signal).catch(() => []),
-        api.styleRecommendations(token, 24, ctrl.signal).catch(() => []),
-        api.styleScores(token, 30, ctrl.signal).catch(() => []),
-        api.userProfile(me.id, token, ctrl.signal),
+        api.catalogRequests(authToken, 60, ctrl.signal).catch(() => []),
+        api.catalogRecommendations(authToken, 24, ctrl.signal).catch(() => []),
+        api.styleRecommendations(authToken, 24, ctrl.signal).catch(() => []),
+        api.styleScores(authToken, 30, ctrl.signal).catch(() => []),
+        api.userProfile(me.id, authToken, ctrl.signal),
       ])
 
       const profileRadar = profile?.radar_vector ?? {}
@@ -552,11 +551,14 @@ function ProfilePageInner() {
           minute: '2-digit',
         })
 
-        const reqImage = req.image_path
-          ? req.image_path.startsWith('http://') || req.image_path.startsWith('https://')
-            ? req.image_path
-            : mediaUrl(req.image_path, token)
-          : '/images/outfit-1.png'
+        const imagePath = req.image_path
+        let reqImage = '/images/outfit-1.png'
+        if (typeof imagePath === 'string' && imagePath.length > 0) {
+          reqImage =
+            imagePath.startsWith('http://') || imagePath.startsWith('https://')
+              ? imagePath
+              : mediaUrl(imagePath as string, authToken)
+        }
         return {
           id: req.id,
           createdAtLabel,
@@ -575,7 +577,7 @@ function ProfilePageInner() {
       if (captureParam && !capRows.some((r) => r.id === captureParam)) {
         const reqObj =
           (reqs ?? []).find((r) => r.id === captureParam) ??
-          (await api.catalogRequest(captureParam, token, ctrl.signal).catch(() => null))
+          (await api.catalogRequest(captureParam, authToken, ctrl.signal).catch(() => null))
         if (reqObj && reqObj.image_path) extra = await buildRequestRow(reqObj)
       }
 
@@ -866,138 +868,77 @@ function ProfilePageInner() {
 
               <div className="flex min-w-0 flex-col gap-3">
                 <div className="rounded-2xl border border-border/60 bg-muted/20 p-4">
-                  <div className="text-sm font-medium">Best correlated matches</div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">Recent captures</div>
+                    <Badge variant="secondary">{recent.length ? `${recent.length}` : '0'}</Badge>
+                  </div>
                   <div className="text-muted-foreground mt-1 text-sm leading-relaxed">
-                    These are the top picks per region (heuristic based on product titles). Hover the boxes for quick
-                    links.
+                    Tap a capture to switch the preview. Share links let you open a specific capture later.
                   </div>
                 </div>
 
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {[{ k: 'top' as const, label: 'Top', p: topProduct }, { k: 'bottom' as const, label: 'Bottom', p: bottomProduct }, { k: 'shoes' as const, label: 'Shoes', p: shoesProduct }].map(
-                    (row) => (
-                      <div
-                        key={row.k}
-                        className="rounded-2xl border border-border/60 p-4 transition-[transform,box-shadow,border-color,background-color] duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:border-foreground/15 hover:bg-muted/20"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-sm font-medium">{row.label}</div>
-                          <Badge variant="secondary">Best match</Badge>
-                        </div>
-                        <div className="mt-2 text-sm font-medium line-clamp-2">{row.p?.title ?? '—'}</div>
-                        <div className="text-muted-foreground mt-1 text-xs">
-                          {[row.p?.brand ?? null, money(row.p?.price, row.p?.currency) || null]
-                            .filter(Boolean)
-                            .join(' · ') || 'No correlated product available'}
-                        </div>
-                        {row.p?.url ? (
-                          <a
-                            href={row.p.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="mt-3 inline-flex items-center rounded-full border border-border bg-background px-3 py-1 text-xs font-medium transition-colors hover:bg-muted/50"
-                          >
-                            Open product
-                          </a>
-                        ) : null}
-                      </div>
-                    ),
-                  )}
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+                {recent.length ? (
+                  <div className="grid gap-3">
+                    {recent.slice(0, 6).map((cap) => {
+                      const active = cap.id === selectedCapture?.id
+                      return (
+                        <div
+                          key={cap.id}
+                          className={cn(
+                            'rounded-2xl border border-border/60 p-3',
+                            'transition-[transform,box-shadow,border-color,background-color] duration-300 will-change-transform',
+                            'hover:-translate-y-0.5 hover:shadow-lg hover:border-foreground/15 hover:bg-muted/20',
+                            active && 'border-foreground/20 bg-muted/20',
+                          )}
+                        >
+                          <div className="flex items-center gap-3">
+                            <button
+                              type="button"
+                              className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                              onClick={() => setSelectedCaptureId(cap.id)}
+                              title={cap.id}
+                            >
+                              <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl bg-muted">
+                                <img src={cap.imageUrl} alt={cap.id} className="h-full w-full object-cover" />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Badge variant="outline">{cap.status}</Badge>
+                                  <div className="text-sm font-medium">{cap.createdAtLabel}</div>
+                                </div>
+                                <div className="text-muted-foreground mt-0.5 truncate text-[11px] font-mono">
+                                  {cap.id}
+                                </div>
+                              </div>
+                            </button>
 
-        <Separator className="my-8" />
-
-        {/* Row 1: Recent captures + correlated products */}
-        <Card
-          ref={recentView.ref as any}
-          className={cn(
-            'mt-8 overflow-hidden transition-[transform,box-shadow,opacity] duration-500 will-change-transform',
-            recentView.inView ? 'animate-spotlight' : 'opacity-0 motion-reduce:opacity-100',
-            loading && 'opacity-80',
-          )}
-        >
-          <CardHeader className="pb-3">
-            <CardTitle className="text-2xl md:text-3xl">Recent captures</CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            {recent.length ? (
-              <div className="grid gap-4">
-                {recent.map((cap) => (
-                  <div
-                    key={cap.id}
-                    className={cn(
-                      'rounded-2xl border border-border/60 p-4',
-                      'transition-[transform,box-shadow,border-color,background-color] duration-300 will-change-transform',
-                      'hover:-translate-y-0.5 hover:shadow-lg hover:border-foreground/15 hover:bg-muted/20',
-                    )}
-                  >
-                    <div className="flex flex-col gap-4 xl:flex-row">
-                      <div className="flex min-w-0 items-center gap-4 xl:w-[420px]">
-                        <div className="relative h-24 w-24 overflow-hidden rounded-2xl bg-muted">
-                          <img
-                            src={cap.imageUrl}
-                            alt={cap.id}
-                            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
-                          />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant="outline">{cap.status}</Badge>
-                            <div className="text-sm font-medium">
-                              {cap.createdAtLabel}
-                            </div>
-                          </div>
-                          <div className="text-muted-foreground mt-1 text-xs font-mono">
-                            {cap.id}
-                          </div>
-                          <div className="mt-2 flex items-center gap-2">
                             <Button
                               type="button"
                               size="sm"
                               variant="outline"
                               className="h-8 rounded-full px-3"
-                              onClick={() => copyShareLink(cap.id)}
+                              onClick={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                copyShareLink(cap.id)
+                              }}
                               title={copiedCaptureId === cap.id ? 'Copied link' : 'Copy share link'}
                             >
                               <Link2 className="mr-2 size-4" />
-                              {copiedCaptureId === cap.id ? 'Copied' : 'Share link'}
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              className="h-8 rounded-full px-3"
-                              onClick={() => setSelectedCaptureId(cap.id)}
-                            >
-                              View
+                              {copiedCaptureId === cap.id ? 'Copied' : 'Share'}
                             </Button>
                           </div>
                         </div>
-                      </div>
-
-                      <div className="min-w-0 flex-1">
-                        <div className="text-muted-foreground mb-3 text-xs">
-                          Correlated products (best matches)
-                        </div>
-                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                          {cap.products.slice(0, 4).map((p) => (
-                            <ProductCard key={p.id} p={p} source="capture" onChecked={onChecked} />
-                          ))}
-                        </div>
-                      </div>
-                    </div>
+                      )
+                    })}
                   </div>
-                ))}
+                ) : (
+                  <div className="text-muted-foreground text-sm">
+                    No captures yet. Upload one and come back—this section will populate automatically.
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="text-muted-foreground text-sm">
-                No captures yet. Upload one and come back—this section will populate automatically.
-              </div>
-            )}
+            </div>
           </CardContent>
         </Card>
 

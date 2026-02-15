@@ -74,6 +74,10 @@ class SnapDetectorService {
   DateTime _firstSnapTime = DateTime(2000);
   bool _awaitingSecondSnap = false;
 
+  /// How long to freeze ambient tracking after a trigger so TTS feedback
+  /// doesn't corrupt the baseline.
+  static const int _ambientFreezeMs = 5000;
+
   // Rolling ambient (on filtered signal).
   double _ambientRms = 0;
   static const double _ambientAlpha = 0.04;
@@ -279,11 +283,17 @@ class SnapDetectorService {
           'filteredRms=${fRms.toStringAsFixed(0)}, zcr=${zcr.toStringAsFixed(3)}');
     }
 
-    // Update ambient (only with quiet frames).
+    // Update ambient (only with quiet frames, and NOT during the post-trigger
+    // freeze window where TTS playback would corrupt the baseline).
+    final msSinceTrigger =
+        DateTime.now().difference(_lastTriggerTime).inMilliseconds;
+    final ambientFrozen = msSinceTrigger < _ambientFreezeMs;
+
     if (!_ambientInitialized) {
       _ambientRms = fRms;
       _ambientInitialized = true;
-    } else if (fRms < _ambientRms * 3.0 || fRms < minFilteredRms) {
+    } else if (!ambientFrozen &&
+        (fRms < _ambientRms * 3.0 || fRms < minFilteredRms)) {
       _ambientRms = _ambientRms * (1.0 - _ambientAlpha) + fRms * _ambientAlpha;
     }
 
@@ -299,7 +309,8 @@ class SnapDetectorService {
           'spike=${spikeRatio.toStringAsFixed(1)}x, '
           'zcr=${zcr.toStringAsFixed(3)}, '
           'hot=$_consecutiveHotFrames, '
-          'snaps=$_snapsDetected');
+          'snaps=$_snapsDetected'
+          '${ambientFrozen ? ", AMB_FROZEN" : ""}');
     }
 
     // ── Gate 1: Spike (filtered RMS above ambient) ──────────────────
@@ -330,10 +341,9 @@ class SnapDetectorService {
         debugPrint('[SnapDetector] ✗ SUSTAINED SOUND '
             '($_consecutiveHotFrames frames > $maxHotFrames). Speech/music.');
       }
-      if (_awaitingSecondSnap) {
-        _awaitingSecondSnap = false;
-        debugPrint('[SnapDetector]   Cancelled pending first-snap.');
-      }
+      // Do NOT cancel a pending first-snap here — the reverb/echo from the
+      // first snap itself often creates 3+ hot frames which would incorrectly
+      // kill the double-snap window before the second snap can arrive.
       return;
     }
 
