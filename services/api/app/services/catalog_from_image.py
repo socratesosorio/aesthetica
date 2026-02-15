@@ -221,6 +221,7 @@ def _lens_to_shopping_context(image_url: str, cfg: CatalogConfig) -> dict[str, A
 
     visual = lens_data.get("visual_matches") or []
     best = visual[0] if visual else {}
+    print(best)
     best_title = _clean(best.get("title")) or _clean(lens_data.get("search_metadata", {}).get("status")) or "clothing item"
     source = _clean(best.get("source"))
     normalized = _normalize_lens_description(best_title, source)

@@ -188,3 +188,34 @@ Quick health checks:
 curl -s http://localhost:8001/healthz
 curl -s http://localhost:8001/readyz
 ```
+
+### Lens -> Shopping Smoke Test (No Integration Suite Required)
+
+This script runs a real image through:
+1. `POST /v1/catalog/from-image`
+2. Supabase capture upload URL check
+3. Serp Google Lens on that uploaded image
+4. Serp Google Shopping using the normalized Lens description
+
+Run from repo root:
+
+```bash
+docker compose -f infra/docker-compose.yml run --rm api \
+  python services/api/app/scripts/test_lens_shopping_pipeline.py \
+  --image apps/ui-aesthetica/public/images/outfit-1.png \
+  --api-base http://catalog-api:8000
+```
+
+Or use Make:
+
+```bash
+make test-lens-shopping
+# custom image:
+make test-lens-shopping LENS_TEST_IMAGE=apps/ui-aesthetica/public/images/outfit-9.png
+```
+
+The script prints:
+- `request_id`
+- `capture_blob_url` + HTTP status
+- `normalized_description` (Lens-derived query)
+- top Shopping results used by the Lens -> Shopping path
