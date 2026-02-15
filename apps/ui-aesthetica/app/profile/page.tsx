@@ -7,7 +7,6 @@ import { ChevronLeft, ChevronRight, Link2, Search, Sparkles, TrendingUp } from '
 
 import { FashionIdentityTab } from '@/components/aesthetica/fashion-identity-tab'
 import { TasteRadar } from '@/components/aesthetica/taste-radar'
-import { CvBodyBoxes, type RegionLabel } from '@/components/dashboard/cv-body-boxes'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -34,12 +33,6 @@ const forYou = [
   { label: 'Minimal leather footwear', meta: 'under $200' },
   { label: 'Boxy overshirts', meta: 'premium picks' },
   { label: 'Wide silhouettes', meta: 'closest to your profile' },
-] as const
-
-const CV_REGIONS: RegionLabel[] = [
-  { id: 'top', label: 'Top' },
-  { id: 'bottom', label: 'Bottom' },
-  { id: 'shoes', label: 'Shoes' },
 ] as const
 
 type ProductTile = {
@@ -401,7 +394,6 @@ function ProfilePageInner() {
   const [checked, setChecked] = React.useState<CheckedItem[]>([])
   const [loading, setLoading] = React.useState(true)
   const [selectedCaptureId, setSelectedCaptureId] = React.useState<string | null>(null)
-  const [cvMode, setCvMode] = React.useState<'captures' | 'sample'>('captures')
   const [copiedCaptureId, setCopiedCaptureId] = React.useState<string | null>(null)
   const [profileTab, setProfileTab] = React.useState<'profile' | 'fashion-identity'>('profile')
 
@@ -652,45 +644,8 @@ function ProfilePageInner() {
   const selectedProducts = selectedCapture?.products ?? []
   const hasCaptures = recent.length > 0 && !!selectedCapture?.id
   const outfitKind = detectOutfitKind(selectedProducts)
-  const topProduct = bestProductForRegion('top', selectedProducts, outfitKind)
-  const bottomProduct = bestProductForRegion('bottom', selectedProducts, outfitKind)
-  const shoesProduct = bestProductForRegion('shoes', selectedProducts, outfitKind)
-  const regionHints = React.useMemo(
-    () => ({
-      top: topProduct
-        ? {
-            title: topProduct.title,
-            brand: topProduct.brand,
-            priceLabel: money(topProduct.price, topProduct.currency),
-            href: topProduct.url,
-          }
-        : undefined,
-      bottom: bottomProduct
-        ? {
-            title: bottomProduct.title,
-            brand: bottomProduct.brand,
-            priceLabel: money(bottomProduct.price, bottomProduct.currency),
-            href: bottomProduct.url,
-          }
-        : undefined,
-      shoes: shoesProduct
-        ? {
-            title: shoesProduct.title,
-            brand: shoesProduct.brand,
-            priceLabel: money(shoesProduct.price, shoesProduct.currency),
-            href: shoesProduct.url,
-          }
-        : undefined,
-    }),
-    [topProduct, bottomProduct, shoesProduct],
-  )
-  const orderedLabels =
-    outfitKind === 'onepiece'
-      ? (['One-piece', 'Hem / legs', 'Shoes'] as const)
-      : (['Top', 'Bottom', 'Shoes'] as const)
-  const cvSrcRaw =
-    cvMode === 'captures' && selectedCapture?.imageUrl ? selectedCapture.imageUrl : '/images/outfit-1.png'
-  const cvSrc = canvasSafeSrc(cvSrcRaw)
+  const previewSrcRaw = selectedCapture?.imageUrl ? selectedCapture.imageUrl : '/images/outfit-1.png'
+  const previewSrc = canvasSafeSrc(previewSrcRaw)
 
   const copyShareLink = React.useCallback(async (captureId: string) => {
     if (typeof window === 'undefined') return
@@ -762,7 +717,7 @@ function ProfilePageInner() {
           </TabsList>
 
           <TabsContent value="profile" className="mt-4">
-        {/* Top row: Last captured (CV body boxes) */}
+        {/* Top row: Last captured */}
         <Card
           ref={lastCapturedView.ref as any}
           className={cn(
@@ -800,28 +755,6 @@ function ProfilePageInner() {
 
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="secondary">{outfitKind === 'onepiece' ? 'Detected: one-piece' : 'Detected: separates'}</Badge>
-                <div className="flex items-center gap-1 rounded-full border border-border bg-background p-1">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={cvMode === 'captures' ? 'default' : 'ghost'}
-                    className="h-8 rounded-full px-3"
-                    onClick={() => setCvMode('captures')}
-                    disabled={!selectedCapture?.imageUrl}
-                    title={!selectedCapture?.imageUrl ? 'Add a capture to enable' : undefined}
-                  >
-                    Captures
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={cvMode === 'sample' ? 'default' : 'ghost'}
-                    className="h-8 rounded-full px-3"
-                    onClick={() => setCvMode('sample')}
-                  >
-                    Sample
-                  </Button>
-                </div>
 
                 <div className="flex items-center gap-1.5">
                   <Button
@@ -876,17 +809,20 @@ function ProfilePageInner() {
             <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
               <div className="min-w-0">
                 {lastCapturedView.inView ? (
-                  <CvBodyBoxes
-                    src={cvSrc}
-                    regions={CV_REGIONS}
-                    regionHints={regionHints}
-                    orderedLabels={orderedLabels}
-                  />
+                  <div className="relative h-[520px] w-full overflow-hidden rounded-2xl border border-border bg-muted/10">
+                    <img
+                      src={previewSrc}
+                      alt={selectedCapture?.id ? `Capture ${selectedCapture.id}` : 'Sample outfit'}
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                    />
+                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/25 via-transparent to-transparent opacity-60 dark:from-black/45" />
+                  </div>
                 ) : (
                   <div className="h-[520px] w-full rounded-2xl border border-border bg-muted" />
                 )}
                 <div className="text-muted-foreground mt-3 text-xs">
-                  Hover a region (Top / Bottom / Shoes) to see the best correlated product link.
+                  Selected capture preview (no CV overlay).
                 </div>
               </div>
 
