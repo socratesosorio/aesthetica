@@ -13,7 +13,7 @@ import requests
 from PIL import Image
 from sqlalchemy.orm import Session
 
-from app.models import CatalogRecommendation, CatalogRequest
+from app.models import CatalogRecommendation, CatalogRequest, StyleRecommendation, StyleScore
 from app.schemas.catalog import CatalogFromImageResponse, CatalogRecommendationOut
 from app.services.notifier import PokeNotifier
 
@@ -50,18 +50,27 @@ def process_catalog_from_image(
     db.refresh(req)
 
     try:
-        signal = _analyze_image_openai(image_bytes, cfg)
-        queries = _build_queries(signal, use_rich_context=cfg.use_rich_context)
-        matches = _search_serp(queries[0], cfg, max_results=max(10, top_k))
-        ranked = _rank_matches(signal, matches)[:top_k]
+        style_signal = _analyze_style_openai(image_bytes, cfg)
+        style_row = StyleScore(
+            request_id=req.id,
+            image_bytes=image_bytes,
+            description=_clip(style_signal.get("description"), 4000) or "",
+            casual=_score_0_100(style_signal.get("casual")),
+            minimal=_score_0_100(style_signal.get("minimal")),
+            structured=_score_0_100(style_signal.get("structured")),
+            classic=_score_0_100(style_signal.get("classic")),
+            neutral=_score_0_100(style_signal.get("neutral")),
+        )
+        db.add(style_row)
+        db.commit()
 
-        req.pipeline_status = "ok" if ranked else "no_products_found"
-        req.garment_name = signal.get("garment_name")
-        req.brand_hint = signal.get("brand_hint")
-        req.confidence = float(signal.get("confidence", 0.0))
+        style_ctx = _last_style_context(db, limit=5)
+        reco_ctx = _style_recommendation_prompt(style_ctx, cfg)
+        style_matches = _search_serp(reco_ctx["search_query"], cfg, max_results=max(10, top_k))
+        style_ranked = _rank_style_matches(reco_ctx["search_query"], style_matches)[:top_k]
         rows: list[CatalogRecommendation] = []
-        for idx, m in enumerate(ranked, start=1):
-            row = CatalogRecommendation(
+        for idx, m in enumerate(style_ranked, start=1):
+            cat_row = CatalogRecommendation(
                 request_id=req.id,
                 rank=idx,
                 title=_clip(m.get("title"), 1024) or "",
@@ -69,12 +78,31 @@ def process_catalog_from_image(
                 source=_clip(m.get("source"), 255),
                 price_text=_clip(m.get("price_text"), 128),
                 price_value=m.get("price_value"),
-                query_used=_clip(m.get("query"), 2000),
+                query_used=_clip(reco_ctx["search_query"], 2000),
                 recommendation_image_url=_clip(m.get("image_url"), 2048),
                 recommendation_image_bytes=_download_image_bytes(m.get("image_url"), cfg.rec_image_timeout_sec),
             )
-            db.add(row)
-            rows.append(row)
+            rows.append(cat_row)
+            db.add(cat_row)
+            db.add(
+                StyleRecommendation(
+                    request_id=req.id,
+                    rank=idx,
+                    title=_clip(m.get("title"), 1024) or "",
+                    product_url=_clip(m.get("product_url"), 2048) or "",
+                    source=_clip(m.get("source"), 255),
+                    price_text=_clip(m.get("price_text"), 128),
+                    price_value=m.get("price_value"),
+                    query_used=_clip(reco_ctx["search_query"], 2000),
+                    recommendation_image_url=_clip(m.get("image_url"), 2048),
+                    recommendation_image_bytes=_download_image_bytes(m.get("image_url"), cfg.rec_image_timeout_sec),
+                    rationale=_clip(reco_ctx["rationale"], 4000),
+                )
+            )
+        req.pipeline_status = "ok" if rows else "no_products_found"
+        req.garment_name = _clip(style_signal.get("garment_name"), 64)
+        req.brand_hint = _clip(style_signal.get("brand_hint"), 255)
+        req.confidence = float(style_signal.get("confidence", 0.0))
         db.commit()
         db.refresh(req)
         _notify_poke(signal, ranked)
@@ -252,45 +280,120 @@ def _search_serp(query: str, cfg: CatalogConfig, max_results: int) -> list[dict[
     return out
 
 
-def _build_queries(signal: dict[str, Any], use_rich_context: bool) -> list[str]:
-    garment = signal.get("garment_name") or "shirt"
-    brand = signal.get("brand_hint")
-    color = signal.get("color_hint")
-    style = " ".join(signal.get("style_tags", [])[:2]).strip()
-    generic = " ".join([x for x in [color, garment, style] if x]).strip() or garment
-    queries: list[str] = []
-    if brand:
-        queries.append(f"{brand} {generic}".strip())
-    if use_rich_context and signal.get("exact_item_hint"):
-        queries.append(str(signal["exact_item_hint"]).strip())
-    queries.append(generic)
-    seen: set[str] = set()
-    out: list[str] = []
-    for q in queries:
-        k = q.lower().strip()
-        if k and k not in seen:
-            seen.add(k)
-            out.append(q)
-    return out or ["shirt"]
+def _analyze_style_openai(image_bytes: bytes, cfg: CatalogConfig) -> dict[str, Any]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is required")
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    url = _to_data_url(img)
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    system = (
+        "Return strict JSON with keys: description (string), garment_name (string), brand_hint (string|null), "
+        "confidence (0-1), casual (0-100), minimal (0-100), structured (0-100), classic (0-100), neutral (0-100). "
+        "Description should be concise, focused on clothing attributes only."
+    )
+    body = {
+        "model": cfg.openai_model,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe the outfit and score the 5 style attributes from 0 to 100."},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            },
+        ],
+        "temperature": 0.0,
+    }
+    resp = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=headers,
+        json=body,
+        timeout=cfg.openai_timeout_sec,
+    )
+    resp.raise_for_status()
+    parsed = json.loads(resp.json()["choices"][0]["message"]["content"])
+    return {
+        "description": _clean(parsed.get("description")) or "No description",
+        "garment_name": _clean(parsed.get("garment_name")) or "shirt",
+        "brand_hint": _clean(parsed.get("brand_hint")),
+        "confidence": max(0.0, min(1.0, float(parsed.get("confidence", 0.7)))),
+        "casual": parsed.get("casual", 50),
+        "minimal": parsed.get("minimal", 50),
+        "structured": parsed.get("structured", 50),
+        "classic": parsed.get("classic", 50),
+        "neutral": parsed.get("neutral", 50),
+    }
 
 
-def _rank_matches(signal: dict[str, Any], matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    query_tokens = set(_tokens(" ".join(_build_queries(signal, use_rich_context=False))))
-    brand = (signal.get("brand_hint") or "").lower().strip()
-    preferred = (signal.get("garment_name") or "shirt").lower().strip()
+def _last_style_context(db: Session, limit: int = 5) -> dict[str, Any]:
+    rows = db.query(StyleScore).order_by(StyleScore.created_at.desc()).limit(max(1, limit)).all()
+    if not rows:
+        return {
+            "avg": {"casual": 50.0, "minimal": 50.0, "structured": 50.0, "classic": 50.0, "neutral": 50.0},
+            "descriptions": [],
+        }
+    n = float(len(rows))
+    avg = {
+        "casual": sum(float(r.casual) for r in rows) / n,
+        "minimal": sum(float(r.minimal) for r in rows) / n,
+        "structured": sum(float(r.structured) for r in rows) / n,
+        "classic": sum(float(r.classic) for r in rows) / n,
+        "neutral": sum(float(r.neutral) for r in rows) / n,
+    }
+    descriptions = [r.description for r in reversed(rows)]
+    return {"avg": avg, "descriptions": descriptions}
+
+
+def _style_recommendation_prompt(style_ctx: dict[str, Any], cfg: CatalogConfig) -> dict[str, str]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is required")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    system = (
+        "Return strict JSON with keys: search_query (string), rationale (string). "
+        "search_query should be a concise shopping query for similar clothing items."
+    )
+    user_text = (
+        f"Average scores: {json.dumps(style_ctx.get('avg', {}))}. "
+        f"Last descriptions: {json.dumps(style_ctx.get('descriptions', []))}. "
+        "Recommend similar clothing to search for."
+    )
+    body = {
+        "model": cfg.openai_model,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_text},
+        ],
+        "temperature": 0.2,
+    }
+    resp = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=headers,
+        json=body,
+        timeout=cfg.openai_timeout_sec,
+    )
+    resp.raise_for_status()
+    parsed = json.loads(resp.json()["choices"][0]["message"]["content"])
+    return {
+        "search_query": _clean(parsed.get("search_query")) or "minimal classic casual neutral clothing",
+        "rationale": _clean(parsed.get("rationale")) or "Recommended from score and description profile.",
+    }
+
+
+def _rank_style_matches(query: str, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    q_tokens = set(_tokens(query))
     scored: list[tuple[float, dict[str, Any]]] = []
     for m in matches:
-        title_l = (m.get("title") or "").lower()
-        overlap = len(query_tokens & set(_tokens(m.get("title") or "")))
-        score = float(overlap)
-        if brand:
-            score += 5.0 if brand in title_l else -2.0
-        if preferred and preferred != "shirt" and preferred in title_l:
-            score += 1.5
+        title = m.get("title") or ""
+        score = float(len(q_tokens & set(_tokens(title))))
         if m.get("price_value") is not None:
-            score += 0.4
+            score += 0.3
         if "google.com/search" not in (m.get("product_url") or "").lower():
-            score += 1.0
+            score += 0.8
         scored.append((score, m))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [m for _, m in scored]
@@ -347,6 +450,18 @@ def _price_value(raw: Any) -> float | None:
         return float(m.group(1))
     except ValueError:
         return None
+
+
+def _score_0_100(value: Any) -> float:
+    try:
+        v = float(value)
+    except Exception:
+        return 50.0
+    if v < 0:
+        return 0.0
+    if v > 100:
+        return 100.0
+    return round(v, 2)
 
 
 def _to_response(req: CatalogRequest, rows: list[CatalogRecommendation]) -> CatalogFromImageResponse:

@@ -126,6 +126,14 @@ class CatalogRequest(Base):
         back_populates="request",
         cascade="all, delete-orphan",
     )
+    style_scores: Mapped[list["StyleScore"]] = relationship(
+        back_populates="request",
+        cascade="all, delete-orphan",
+    )
+    style_recommendations: Mapped[list["StyleRecommendation"]] = relationship(
+        back_populates="request",
+        cascade="all, delete-orphan",
+    )
 
 
 class CatalogRecommendation(Base):
@@ -144,3 +152,40 @@ class CatalogRecommendation(Base):
     recommendation_image_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
     request: Mapped[CatalogRequest] = relationship(back_populates="recommendations")
+
+
+class StyleScore(Base):
+    __tablename__ = "style_scores"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    request_id: Mapped[str] = mapped_column(ForeignKey("catalog_requests.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    image_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    description: Mapped[str] = mapped_column(Text(), nullable=False)
+    casual: Mapped[float] = mapped_column(Float, nullable=False)
+    minimal: Mapped[float] = mapped_column(Float, nullable=False)
+    structured: Mapped[float] = mapped_column(Float, nullable=False)
+    classic: Mapped[float] = mapped_column(Float, nullable=False)
+    neutral: Mapped[float] = mapped_column(Float, nullable=False)
+
+    request: Mapped[CatalogRequest] = relationship(back_populates="style_scores")
+
+
+class StyleRecommendation(Base):
+    __tablename__ = "style_recommendations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    request_id: Mapped[str] = mapped_column(ForeignKey("catalog_requests.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(1024), nullable=False)
+    product_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    source: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    price_text: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    price_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    query_used: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    recommendation_image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    recommendation_image_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(Text(), nullable=True)
+
+    request: Mapped[CatalogRequest] = relationship(back_populates="style_recommendations")

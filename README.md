@@ -144,6 +144,11 @@ Dedicated endpoint for image -> OpenAI -> Serp -> DB write:
 - `POST http://localhost:8001/v1/catalog/from-image`
 - No auth
 - Accepts multipart `image` upload or raw `image/jpeg` body
+- Runs additional style-recommendation flow immediately:
+  - OpenAI call #1: style description + 5 scores (0-100) into `style_scores`
+  - Aggregate last 5 score rows/descriptions
+  - OpenAI call #2: recommendation rationale + search query
+  - One Serp shopping call -> top 5 rows into `style_recommendations`
 
 Run (from repo root):
 
@@ -153,11 +158,24 @@ docker compose -f infra/docker-compose.yml up -d --build postgres redis api cata
 make migrate
 ```
 
-Test:
+Test with any local image file (example below uses one that exists in this repo):
 
 ```bash
-curl -s -X POST "http://localhost:8001/v1/catalog/from-image" \
-  -F "image=@tests/web_detection/test_images/dodgers.jpeg"
+curl -sS -X POST "http://localhost:8001/v1/catalog/from-image" -F "image=@apps/ui-aesthetica/public/images/outfit-1.png"
+```
+
+Verify latest writes in the configured database:
+
+```bash
+docker compose -f infra/docker-compose.yml run --rm api sh -lc 'python - <<\"PY\"
+from sqlalchemy import create_engine, text
+from app.core.config import settings
+engine = create_engine(settings.database_url)
+with engine.connect() as c:
+    print("catalog_requests:", c.execute(text("select count(*) from catalog_requests")).scalar())
+    print("style_scores:", c.execute(text("select count(*) from style_scores")).scalar())
+    print("style_recommendations:", c.execute(text("select count(*) from style_recommendations")).scalar())
+PY'
 ```
 
 Quick health checks:
