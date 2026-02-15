@@ -142,18 +142,17 @@ def _notify_poke(
 ) -> None:
     """Send a vibey AI-generated message to Poke about what the user just captured."""
     try:
-        garment = signal.get("garment_name") or "fit"
-        brand = signal.get("brand_hint")
-        details = f"garment: {garment}"
-        if brand:
-            details += f", brand: {brand}"
+        del signal
+        del ranked
+        if not input_image_url:
+            logger.warning("poke_notify_skipped_no_input_image_url")
+            return
+
+        lens_ctx = _lens_to_shopping_context(input_image_url, cfg or CatalogConfig())
+        details = str(lens_ctx.get("description") or "captured clothing item")
         lens_top: dict[str, Any] | None = None
-        if input_image_url:
-            lens_ctx = _lens_to_shopping_context(input_image_url, cfg or CatalogConfig())
-            if lens_ctx.get("description"):
-                details = str(lens_ctx["description"])
-            if lens_ctx.get("shopping"):
-                lens_top = lens_ctx["shopping"][0]
+        if lens_ctx.get("shopping"):
+            lens_top = lens_ctx["shopping"][0]
 
         top_match = ""
         image_url = None
@@ -207,6 +206,7 @@ def _lens_to_shopping_context(image_url: str, cfg: CatalogConfig) -> dict[str, A
 
     visual = lens_data.get("visual_matches") or []
     best = visual[0] if visual else {}
+    print(best)
     best_title = _clean(best.get("title")) or _clean(lens_data.get("search_metadata", {}).get("status")) or "clothing item"
     source = _clean(best.get("source"))
     normalized = _normalize_lens_description(best_title, source)
