@@ -7,7 +7,8 @@ Detailed setup: `docs/setup.md`
 ## Monorepo Layout
 
 - `apps/mobile-capture` Flutter companion app with DAT abstraction, frame preprocessing, upload.
-- `apps/dashboard-web` React + Vite mobile-first dashboard.
+- `apps/ui-aesthetica` Next.js landing page + dashboard (App Router).
+- `apps/dashboard-web` Legacy React + Vite dashboard (kept for reference).
 - `services/api` FastAPI API, auth, capture ingestion, DB models, endpoints.
 - `services/worker` Celery worker for async inference pipeline.
 - `services/ml` Shared ML pipeline code: segmentation, embeddings, attributes, FAISS, radar.
@@ -60,13 +61,15 @@ Dashboard: `http://localhost:5173`
 docker compose -f infra/docker-compose.yml up --build
 ```
 
-### Dashboard Web
+### UI (Landing + Dashboard)
 
 ```bash
-cd apps/dashboard-web
-npm install
-npm run dev
+make ui
 ```
+
+This serves:
+- Landing: `http://localhost:5173/`
+- Dashboard: `http://localhost:5173/dashboard`
 
 ### Mobile Capture (Flutter)
 
