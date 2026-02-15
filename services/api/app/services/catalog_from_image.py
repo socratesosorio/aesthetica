@@ -122,7 +122,7 @@ def process_catalog_from_image(
             req.error = f"supabase_storage_upload_error: {upload_error}"
         db.commit()
         db.refresh(req)
-        _notify_poke(style_signal, style_ranked, input_image_url=uploaded_public_url, cfg=cfg)
+        _notify_poke(style_signal, style_ranked, input_image_url=uploaded_public_url, request_id=req.id, cfg=cfg)
         return _to_response(req, rows)
     except Exception as exc:
         req.pipeline_status = "pipeline_error"
@@ -138,10 +138,13 @@ def _notify_poke(
     signal: dict[str, Any],
     ranked: list[dict[str, Any]],
     input_image_url: str | None = None,
+    request_id: int | None = None,
     cfg: CatalogConfig | None = None,
 ) -> None:
     """Send a vibey AI-generated message to Poke about what the user just captured."""
     try:
+        from app.core.config import settings
+
         garment = signal.get("garment_name") or "fit"
         brand = signal.get("brand_hint")
         details = f"garment: {garment}"
@@ -155,34 +158,45 @@ def _notify_poke(
             if lens_ctx.get("shopping"):
                 lens_top = lens_ctx["shopping"][0]
 
-        top_match = ""
+        product_url = None
         image_url = None
+        top_match = ""
         if lens_top:
             top_match = f"Top match: {lens_top.get('title', '')}"
             if lens_top.get("price_text"):
                 top_match += f" ({lens_top.get('price_text')})"
+            product_url = lens_top.get("product_url")
             image_url = lens_top.get("image_url")
         elif ranked:
             top = ranked[0]
-            title = top.get("title", "")
-            price = top.get("price_text")
+            top_match = f"Top match: {top.get('title', '')}"
+            if top.get("price_text"):
+                top_match += f" ({top.get('price_text')})"
             product_url = top.get("product_url")
             image_url = top.get("image_url")
-            top_match = f"Top match: {title}"
-            if price:
-                top_match += f" ({price})"
-            if product_url:
-                top_match += f"\n{product_url}"
             if len(ranked) > 1:
                 top_match += f"\n+ {len(ranked) - 1} more options saved"
 
-        opener = _generate_poke_opener(details)
+        # Prefer our own dashboard link over the raw external product URL
+        link = None
+        if request_id:
+            base = settings.base_dashboard_url.rstrip("/")
+            link = f"{base}/catalog/{request_id}"
+        if not link:
+            link = product_url
 
+        poke = PokeNotifier()
+
+        # Message 1: link (so iMessage renders a rich link preview)
+        if link:
+            poke.send(link, image_url=image_url)
+
+        # Message 2: vibey opener + product details
+        opener = _generate_poke_opener(details)
         msg = opener
         if top_match:
             msg += f"\n\n{top_match}"
-
-        PokeNotifier().send(msg, image_url=image_url)
+        poke.send(msg, image_url=image_url if not link else None)
     except Exception:
         logger.exception("poke_notify_failed")
 
