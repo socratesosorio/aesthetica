@@ -1,16 +1,17 @@
 import { NextRequest } from 'next/server'
 
 function getApiOrigin() {
-  const base = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000').replace(/\/+$/, '')
+  const base = (process.env.NEXT_PUBLIC_API_BASE_URL ?? '').trim().replace(/\/+$/, '')
+  if (!base) return null
   try {
     return new URL(base).origin
   } catch {
-    return 'http://localhost:8000'
+    return null
   }
 }
 
-function isAllowedOrigin(u: URL, apiOrigin: string) {
-  if (u.origin === apiOrigin) return true
+function isAllowedOrigin(u: URL, apiOrigin: string | null) {
+  if (apiOrigin && u.origin === apiOrigin) return true
   // Allow Supabase Storage public URLs (used for catalog_requests.image_path).
   if (u.hostname.endsWith('.supabase.co') || u.hostname.endsWith('.supabase.in')) return true
   return false
