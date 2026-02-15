@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation'
 import { Search, Sparkles, TrendingUp } from 'lucide-react'
 
 import { TasteRadar } from '@/components/aesthetica/taste-radar'
+import { CvBodyBoxes, type RegionLabel } from '@/components/dashboard/cv-body-boxes'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -36,6 +37,12 @@ const forYou = [
   { label: 'Wide silhouettes', meta: 'closest to your profile' },
 ] as const
 
+const CV_REGIONS: RegionLabel[] = [
+  { id: 'top', label: 'Top' },
+  { id: 'bottom', label: 'Bottom' },
+  { id: 'shoes', label: 'Shoes' },
+] as const
+
 type ProductTile = {
   id: string
   title: string
@@ -60,6 +67,49 @@ type CaptureRow = {
   status: string
   imageUrl: string
   products: ProductTile[]
+}
+
+type OutfitKind = 'separates' | 'onepiece'
+
+function detectOutfitKind(products: ProductTile[]): OutfitKind {
+  const text = products.map((p) => `${p.title ?? ''} ${p.brand ?? ''} ${p.badge ?? ''}`).join(' ').toLowerCase()
+  const onepieceKeys = ['dress', 'jumpsuit', 'romper', 'overall', 'onesie', 'bodysuit']
+  return onepieceKeys.some((k) => text.includes(k)) ? 'onepiece' : 'separates'
+}
+
+function bestProductForRegion(
+  region: 'top' | 'bottom' | 'shoes',
+  products: ProductTile[],
+  kind: OutfitKind,
+) {
+  const hay = (p: ProductTile) => `${p.title ?? ''} ${p.brand ?? ''} ${p.badge ?? ''}`.toLowerCase()
+  const byRegion: Record<typeof region, string[]> =
+    kind === 'onepiece'
+      ? {
+          shoes: ['shoe', 'loafer', 'sneaker', 'boot', 'heel', 'mule', 'sandal', 'clog'],
+          bottom: ['dress', 'jumpsuit', 'romper', 'overall', 'skirt', 'gown', 'maxi', 'mini'],
+          top: ['dress', 'jumpsuit', 'romper', 'overall', 'onesie', 'bodysuit', 'gown'],
+        }
+      : {
+          shoes: ['shoe', 'loafer', 'sneaker', 'boot', 'heel', 'mule', 'sandal', 'clog'],
+          bottom: ['pant', 'trouser', 'jean', 'denim', 'skirt', 'short', 'cargo'],
+          top: ['jacket', 'coat', 'blazer', 'shirt', 'tee', 't-shirt', 'knit', 'sweater', 'hoodie', 'cardigan'],
+        }
+
+  const keys = byRegion[region]
+  const match = products.find((p) => keys.some((k) => hay(p).includes(k)))
+  if (match) return match
+
+  // Fallbacks: keep it deterministic.
+  if (region === 'top') return products[0]
+  if (region === 'bottom') return products[1] ?? products[0]
+  return products[2] ?? products[0]
+}
+
+function canvasSafeSrc(src: string) {
+  if (!src) return src
+  if (src.startsWith('/')) return src
+  return `/api/image-proxy?url=${encodeURIComponent(src)}`
 }
 
 function money(price: number | null | undefined, currency: string | null | undefined) {
@@ -232,6 +282,9 @@ function ProfileTopbar({
             <Link href="/">Back to landing</Link>
           </Button>
           <Button asChild size="sm" variant="outline" className="h-9">
+            <Link href="/database">Database</Link>
+          </Button>
+          <Button asChild size="sm" variant="outline" className="h-9">
             <Link href="/logout">Log out</Link>
           </Button>
         </div>
@@ -248,9 +301,12 @@ export default function ProfilePage() {
   const [tasteRadar, setTasteRadar] = React.useState(sampleTasteRadar)
   const [checked, setChecked] = React.useState<CheckedItem[]>([])
   const [loading, setLoading] = React.useState(true)
+  const [selectedCaptureId, setSelectedCaptureId] = React.useState<string | null>(null)
+  const [cvMode, setCvMode] = React.useState<'captures' | 'sample'>('captures')
 
   const heroView = useInViewOnce<HTMLDivElement>(0.08)
   const recentView = useInViewOnce<HTMLDivElement>(0.1)
+  const lastCapturedView = useInViewOnce<HTMLDivElement>(0.1)
   const recsView = useInViewOnce<HTMLDivElement>(0.1)
   const kpisView = useInViewOnce<HTMLDivElement>(0.12)
   const belowView = useInViewOnce<HTMLDivElement>(0.12)
@@ -262,6 +318,14 @@ export default function ProfilePage() {
   React.useEffect(() => {
     setChecked(loadChecked())
   }, [])
+
+  React.useEffect(() => {
+    if (!recent.length) {
+      setSelectedCaptureId(null)
+      return
+    }
+    setSelectedCaptureId((cur) => (cur && recent.some((r) => r.id === cur) ? cur : recent[0]!.id))
+  }, [recent])
 
   const onChecked = React.useCallback(
     (p: ProductTile, source: 'recommended' | 'capture') => {
@@ -312,7 +376,7 @@ export default function ProfilePage() {
       const me = await api.me(token, ctrl.signal)
       const [caps, recs, profile] = await Promise.all([
         api.userCaptures(me.id, token, 10, ctrl.signal),
-        api.recommendations(token, 24, ctrl.signal),
+        api.catalogRecommendations(token, 24, ctrl.signal).catch(() => []),
         api.userProfile(me.id, token, ctrl.signal),
       ])
 
@@ -401,15 +465,15 @@ export default function ProfilePage() {
 
       setRecent(capRows)
       setRecommended(
-        (recs ?? []).map((p) => ({
-          id: p.product_id,
-          title: p.title,
-          brand: p.brand,
-          price: p.price,
-          currency: p.currency,
-          imageUrl: p.image_url || null,
-          url: p.product_url,
-          badge: p.reason || null,
+        (recs ?? []).map((r) => ({
+          id: `${r.rank}_${r.product_url}`,
+          title: r.title,
+          brand: r.source || 'Catalog',
+          price: r.price_value ?? null,
+          currency: 'USD',
+          imageUrl: r.recommendation_image_url || null,
+          url: r.product_url,
+          badge: r.price_text || r.source || 'Catalog',
         })),
       )
       setLoading(false)
@@ -426,6 +490,55 @@ export default function ProfilePage() {
   }, [query, recommended])
 
   const lastChecked = React.useMemo(() => checked.slice(0, 7), [checked])
+  const selectedCapture = React.useMemo(
+    () => (selectedCaptureId ? recent.find((r) => r.id === selectedCaptureId) : undefined) ?? recent[0],
+    [recent, selectedCaptureId],
+  )
+  const selectedIndex = React.useMemo(
+    () => (selectedCapture ? Math.max(0, recent.findIndex((r) => r.id === selectedCapture.id)) : -1),
+    [recent, selectedCapture],
+  )
+  const selectedProducts = selectedCapture?.products ?? []
+  const outfitKind = detectOutfitKind(selectedProducts)
+  const topProduct = bestProductForRegion('top', selectedProducts, outfitKind)
+  const bottomProduct = bestProductForRegion('bottom', selectedProducts, outfitKind)
+  const shoesProduct = bestProductForRegion('shoes', selectedProducts, outfitKind)
+  const regionHints = React.useMemo(
+    () => ({
+      top: topProduct
+        ? {
+            title: topProduct.title,
+            brand: topProduct.brand,
+            priceLabel: money(topProduct.price, topProduct.currency),
+            href: topProduct.url,
+          }
+        : undefined,
+      bottom: bottomProduct
+        ? {
+            title: bottomProduct.title,
+            brand: bottomProduct.brand,
+            priceLabel: money(bottomProduct.price, bottomProduct.currency),
+            href: bottomProduct.url,
+          }
+        : undefined,
+      shoes: shoesProduct
+        ? {
+            title: shoesProduct.title,
+            brand: shoesProduct.brand,
+            priceLabel: money(shoesProduct.price, shoesProduct.currency),
+            href: shoesProduct.url,
+          }
+        : undefined,
+    }),
+    [topProduct, bottomProduct, shoesProduct],
+  )
+  const orderedLabels =
+    outfitKind === 'onepiece'
+      ? (['One-piece', 'Hem / legs', 'Shoes'] as const)
+      : (['Top', 'Bottom', 'Shoes'] as const)
+  const cvSrcRaw =
+    cvMode === 'captures' && selectedCapture?.imageUrl ? selectedCapture.imageUrl : '/images/outfit-6.png'
+  const cvSrc = canvasSafeSrc(cvSrcRaw)
 
   return (
     <main className="min-h-screen bg-background">
@@ -455,6 +568,163 @@ export default function ProfilePage() {
             Browse recent captures and shop items recommended from your evolving taste radar—laid out like a marketplace home page.
           </p>
         </div>
+
+        {/* Top row: Last captured (CV body boxes) */}
+        <Card
+          ref={lastCapturedView.ref as any}
+          className={cn(
+            'mt-8 overflow-hidden transition-[transform,box-shadow,opacity] duration-500 will-change-transform',
+            lastCapturedView.inView ? 'animate-reveal-up animation-delay-150' : 'opacity-0 motion-reduce:opacity-100',
+            loading && 'opacity-90',
+          )}
+        >
+          <CardHeader className="pb-3">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div className="min-w-0">
+                <CardTitle className="text-2xl md:text-3xl">Last captured</CardTitle>
+                <div className="text-muted-foreground mt-1 text-xs">
+                  {selectedCapture
+                    ? `Showing ${selectedCapture.createdAtLabel} · ${selectedCapture.id}`
+                    : 'No captures yet — using a sample image'}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary">{outfitKind === 'onepiece' ? 'Detected: one-piece' : 'Detected: separates'}</Badge>
+                <div className="flex items-center gap-1 rounded-full border border-border bg-background p-1">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={cvMode === 'captures' ? 'default' : 'ghost'}
+                    className="h-8 rounded-full px-3"
+                    onClick={() => setCvMode('captures')}
+                    disabled={!selectedCapture?.imageUrl}
+                    title={!selectedCapture?.imageUrl ? 'Add a capture to enable' : undefined}
+                  >
+                    Captures
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={cvMode === 'sample' ? 'default' : 'ghost'}
+                    className="h-8 rounded-full px-3"
+                    onClick={() => setCvMode('sample')}
+                  >
+                    Sample
+                  </Button>
+                </div>
+
+                {recent.length ? (
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 rounded-full px-3"
+                      onClick={() => setSelectedCaptureId(recent[Math.max(0, selectedIndex - 1)]!.id)}
+                      disabled={selectedIndex <= 0}
+                    >
+                      Prev
+                    </Button>
+                    <div className="flex max-w-[52vw] items-center gap-1 overflow-x-auto rounded-full border border-border bg-background p-1">
+                      {recent.slice(0, 8).map((cap) => {
+                        const active = cap.id === selectedCapture?.id
+                        return (
+                          <Button
+                            key={cap.id}
+                            type="button"
+                            size="sm"
+                            variant={active ? 'default' : 'ghost'}
+                            className={cn('h-8 rounded-full px-3', !active && 'text-muted-foreground')}
+                            onClick={() => setSelectedCaptureId(cap.id)}
+                            title={cap.id}
+                          >
+                            {cap.createdAtLabel}
+                          </Button>
+                        )
+                      })}
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 rounded-full px-3"
+                      onClick={() =>
+                        setSelectedCaptureId(recent[Math.min(recent.length - 1, selectedIndex + 1)]!.id)
+                      }
+                      disabled={selectedIndex < 0 || selectedIndex >= recent.length - 1}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+              <div className="min-w-0">
+                {lastCapturedView.inView ? (
+                  <CvBodyBoxes
+                    src={cvSrc}
+                    regions={CV_REGIONS}
+                    regionHints={regionHints}
+                    orderedLabels={orderedLabels}
+                  />
+                ) : (
+                  <div className="h-[520px] w-full rounded-2xl border border-border bg-muted" />
+                )}
+                <div className="text-muted-foreground mt-3 text-xs">
+                  Hover a region (Top / Bottom / Shoes) to see the best correlated product link.
+                </div>
+              </div>
+
+              <div className="flex min-w-0 flex-col gap-3">
+                <div className="rounded-2xl border border-border/60 bg-muted/20 p-4">
+                  <div className="text-sm font-medium">Best correlated matches</div>
+                  <div className="text-muted-foreground mt-1 text-sm leading-relaxed">
+                    These are the top picks per region (heuristic based on product titles). Hover the boxes for quick
+                    links.
+                  </div>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {[{ k: 'top' as const, label: 'Top', p: topProduct }, { k: 'bottom' as const, label: 'Bottom', p: bottomProduct }, { k: 'shoes' as const, label: 'Shoes', p: shoesProduct }].map(
+                    (row) => (
+                      <div
+                        key={row.k}
+                        className="rounded-2xl border border-border/60 p-4 transition-[transform,box-shadow,border-color,background-color] duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:border-foreground/15 hover:bg-muted/20"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium">{row.label}</div>
+                          <Badge variant="secondary">Best match</Badge>
+                        </div>
+                        <div className="mt-2 text-sm font-medium line-clamp-2">{row.p?.title ?? '—'}</div>
+                        <div className="text-muted-foreground mt-1 text-xs">
+                          {[row.p?.brand ?? null, money(row.p?.price, row.p?.currency) || null]
+                            .filter(Boolean)
+                            .join(' · ') || 'No correlated product available'}
+                        </div>
+                        {row.p?.url ? (
+                          <a
+                            href={row.p.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-3 inline-flex items-center rounded-full border border-border bg-background px-3 py-1 text-xs font-medium transition-colors hover:bg-muted/50"
+                          >
+                            Open product
+                          </a>
+                        ) : null}
+                      </div>
+                    ),
+                  )}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Separator className="my-8" />
 
         {/* Row 1: Recent captures + correlated products */}
         <Card
