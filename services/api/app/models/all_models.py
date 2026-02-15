@@ -116,6 +116,8 @@ class CatalogRequest(Base):
     original_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     original_content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     original_image_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Optional persisted path for later rendering (present in Supabase schema).
+    image_path: Mapped[str | None] = mapped_column(Text(), nullable=True)
     pipeline_status: Mapped[str] = mapped_column(String(64), nullable=False, default="processing")
     garment_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     brand_hint: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -141,6 +143,7 @@ class CatalogRecommendation(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     request_id: Mapped[str] = mapped_column(ForeignKey("catalog_requests.id", ondelete="CASCADE"), index=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String(1024), nullable=False)
     product_url: Mapped[str] = mapped_column(String(2048), nullable=False)
@@ -160,13 +163,14 @@ class StyleScore(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     request_id: Mapped[str] = mapped_column(ForeignKey("catalog_requests.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    image_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    description: Mapped[str] = mapped_column(Text(), nullable=False)
-    casual: Mapped[float] = mapped_column(Float, nullable=False)
-    minimal: Mapped[float] = mapped_column(Float, nullable=False)
-    structured: Mapped[float] = mapped_column(Float, nullable=False)
-    classic: Mapped[float] = mapped_column(Float, nullable=False)
-    neutral: Mapped[float] = mapped_column(Float, nullable=False)
+    image_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text(), nullable=True)
+
+    casual: Mapped[float | None] = mapped_column(Float, nullable=True)
+    minimal: Mapped[float | None] = mapped_column(Float, nullable=True)
+    structured: Mapped[float | None] = mapped_column(Float, nullable=True)
+    classic: Mapped[float | None] = mapped_column(Float, nullable=True)
+    neutral: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     request: Mapped[CatalogRequest] = relationship(back_populates="style_scores")
 

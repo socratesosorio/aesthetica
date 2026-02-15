@@ -144,6 +144,7 @@ Dedicated endpoint for image -> OpenAI -> Serp -> DB write:
 - `POST http://localhost:8001/v1/catalog/from-image`
 - No auth
 - Accepts multipart `image` upload or raw `image/jpeg` body
+- Uploads the input image to Supabase Storage bucket `captures` (best effort) when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set
 - Runs additional style-recommendation flow immediately:
   - OpenAI call #1: style description + 5 scores (0-100) into `style_scores`
   - Aggregate last 5 score rows/descriptions
@@ -154,6 +155,9 @@ Run (from repo root):
 
 ```bash
 cp .env.example .env
+# set these for storage upload of API input images
+# SUPABASE_URL=https://<project-ref>.supabase.co
+# SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 docker compose -f infra/docker-compose.yml up -d --build postgres redis api catalog-api
 make migrate
 ```

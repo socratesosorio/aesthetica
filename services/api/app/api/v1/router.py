@@ -9,6 +9,7 @@ from app.api.v1.endpoints import internal
 from app.api.v1.endpoints import media
 from app.api.v1.endpoints import products
 from app.api.v1.endpoints import profiles
+from app.api.v1.endpoints import style
 from app.api.v1.endpoints import stream
 
 api_router = APIRouter(prefix="/v1")
@@ -20,3 +21,4 @@ api_router.include_router(products.router, tags=["products"])
 api_router.include_router(media.router, tags=["media"])
 api_router.include_router(internal.router, tags=["internal"])
 api_router.include_router(stream.router, tags=["stream"])
+api_router.include_router(style.router, tags=["style"])
