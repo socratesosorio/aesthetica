@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.models import CatalogRecommendation, CatalogRequest, StyleRecommendation, StyleScore
 from app.schemas.catalog import CatalogFromImageResponse, CatalogRecommendationOut
 from app.services.notifier import PokeNotifier
+from app.services.supabase_storage import upload_catalog_input_image
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,17 @@ def process_catalog_from_image(
     db.add(req)
     db.commit()
     db.refresh(req)
+
+    upload_error: str | None = None
+    try:
+        upload_catalog_input_image(
+            request_id=req.id,
+            image_bytes=image_bytes,
+            content_type=content_type,
+            filename=filename,
+        )
+    except Exception as exc:
+        upload_error = f"{type(exc).__name__}: {exc}"
 
     try:
         style_signal = _analyze_style_openai(image_bytes, cfg)
@@ -103,13 +115,17 @@ def process_catalog_from_image(
         req.garment_name = _clip(style_signal.get("garment_name"), 64)
         req.brand_hint = _clip(style_signal.get("brand_hint"), 255)
         req.confidence = float(style_signal.get("confidence", 0.0))
+        if upload_error:
+            req.error = f"supabase_storage_upload_error: {upload_error}"
         db.commit()
         db.refresh(req)
-        _notify_poke(signal, ranked)
+        _notify_poke(style_signal, style_ranked)
         return _to_response(req, rows)
     except Exception as exc:
         req.pipeline_status = "pipeline_error"
         req.error = f"{type(exc).__name__}: {exc}"
+        if upload_error:
+            req.error = f"{req.error} | supabase_storage_upload_error: {upload_error}"
         db.commit()
         db.refresh(req)
         return _to_response(req, [])

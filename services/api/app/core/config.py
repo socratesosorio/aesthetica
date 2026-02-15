@@ -13,6 +13,10 @@ class Settings(BaseSettings):
 
     database_url: str = Field(default="postgresql+psycopg://postgres:postgres@postgres:5432/aesthetica")
     supabase_database_url: str | None = None
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
+    supabase_storage_bucket: str = "captures"
+    supabase_store_catalog_input: bool = True
     redis_url: str = "redis://redis:6379/0"
 
     secret_key: str = "change-me"
