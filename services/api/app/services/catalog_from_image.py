@@ -40,6 +40,8 @@ def process_catalog_from_image(
 ) -> CatalogFromImageResponse:
     cfg = config or CatalogConfig()
     top_k = max(1, min(cfg.top_k, 5))
+    logger.info("[CATALOG] ── START ── file=%s, content_type=%s, size=%d bytes, top_k=%d",
+                filename, content_type, len(image_bytes), top_k)
     req = CatalogRequest(
         original_filename=_clip(filename, 255),
         original_content_type=_clip(content_type, 128),
@@ -49,23 +51,34 @@ def process_catalog_from_image(
     db.add(req)
     db.commit()
     db.refresh(req)
+    logger.info("[CATALOG] Created request id=%s", req.id)
 
     uploaded_public_url: str | None = None
     upload_error: str | None = None
     try:
-        upload_res = upload_catalog_input_image(
+        result = upload_catalog_input_image(
             request_id=req.id,
             image_bytes=image_bytes,
             content_type=content_type,
             filename=filename,
         )
-        if upload_res is not None:
-            uploaded_public_url = upload_res.public_url
+        if result and result.public_url:
+            req.image_path = result.public_url
+            db.commit()
+            db.refresh(req)
+            logger.info("Image uploaded: %s", result.public_url)
     except Exception as exc:
         upload_error = f"{type(exc).__name__}: {exc}"
+        logger.warning("Image upload failed: %s", upload_error)
 
     try:
+        # 1. Classify the garment (style scores + garment_name).
         style_signal = _analyze_style_openai(image_bytes, cfg)
+        logger.info(
+            "[CATALOG] style_signal: garment_name=%s, description=%s",
+            style_signal.get("garment_name"),
+            (style_signal.get("description") or "")[:120],
+        )
         style_row = StyleScore(
             request_id=req.id,
             image_bytes=image_bytes,
@@ -79,12 +92,61 @@ def process_catalog_from_image(
         db.add(style_row)
         db.commit()
 
-        style_ctx = _last_style_context(db, limit=5)
-        reco_ctx = _style_recommendation_prompt(style_ctx, cfg)
-        style_matches = _search_serp(reco_ctx["search_query"], cfg, max_results=max(10, top_k))
-        style_ranked = _rank_style_matches(reco_ctx["search_query"], style_matches)[:top_k]
+        # 2. Use Google Lens (visual search) for product results — requires
+        #    a public image URL from the Supabase upload above.
+        lens_ctx: dict[str, Any] = {}
+        lens_matches: list[dict[str, Any]] = []
+        if req.image_path:
+            logger.info("[CATALOG] Running Google Lens on %s", req.image_path)
+            lens_ctx = _lens_to_shopping_context(req.image_path, cfg)
+            lens_matches = lens_ctx.get("shopping") or []
+            logger.info(
+                "[CATALOG] Lens description='%s', %d shopping results, titles=%s",
+                (lens_ctx.get("description") or "")[:100],
+                len(lens_matches),
+                [m.get("title", "")[:60] for m in lens_matches[:5]],
+            )
+        else:
+            logger.warning("[CATALOG] No public image URL — skipping Google Lens, falling back to style search")
+
+        # 3. Use Lens results, or fall back to OpenAI vision → Google Shopping.
+        search_query: str = ""
+        rationale: str = ""
+        if lens_matches:
+            search_query = lens_ctx.get("description") or "clothing item"
+            rationale = "Visual match via Google Lens"
+            ranked = lens_matches[:top_k]
+        else:
+            logger.info("[CATALOG] Lens returned 0 results — falling back to OpenAI vision → Shopping")
+            vision = _analyze_image_openai(image_bytes, cfg)
+            logger.info(
+                "[CATALOG] OpenAI vision: garment=%s, brand=%s, color=%s, exact=%s, tags=%s",
+                vision.get("garment_name"), vision.get("brand_hint"),
+                vision.get("color_hint"), vision.get("exact_item_hint"),
+                vision.get("style_tags"),
+            )
+            # Build a concise shopping query from the vision analysis.
+            parts: list[str] = []
+            if vision.get("brand_hint"):
+                parts.append(str(vision["brand_hint"]))
+            if vision.get("color_hint"):
+                parts.append(str(vision["color_hint"]))
+            if vision.get("exact_item_hint"):
+                parts.append(str(vision["exact_item_hint"]))
+            elif vision.get("garment_name"):
+                parts.append(str(vision["garment_name"]))
+            for tag in (vision.get("style_tags") or [])[:2]:
+                parts.append(tag)
+            search_query = " ".join(parts) if parts else "clothing"
+            rationale = "OpenAI vision fallback"
+            logger.info("[CATALOG] Vision fallback query: '%s'", search_query)
+            vision_matches = _search_serp(search_query, cfg, max_results=max(10, top_k))
+            ranked = _rank_style_matches(search_query, vision_matches)[:top_k]
+            logger.info("[CATALOG] Vision fallback returned %d results", len(ranked))
+
+        # 4. Persist results.
         rows: list[CatalogRecommendation] = []
-        for idx, m in enumerate(style_ranked, start=1):
+        for idx, m in enumerate(ranked, start=1):
             cat_row = CatalogRecommendation(
                 request_id=req.id,
                 rank=idx,
@@ -93,7 +155,7 @@ def process_catalog_from_image(
                 source=_clip(m.get("source"), 255),
                 price_text=_clip(m.get("price_text"), 128),
                 price_value=m.get("price_value"),
-                query_used=_clip(reco_ctx["search_query"], 2000),
+                query_used=_clip(search_query, 2000),
                 recommendation_image_url=_clip(m.get("image_url"), 2048),
                 recommendation_image_bytes=_download_image_bytes(m.get("image_url"), cfg.rec_image_timeout_sec),
             )
@@ -108,10 +170,10 @@ def process_catalog_from_image(
                     source=_clip(m.get("source"), 255),
                     price_text=_clip(m.get("price_text"), 128),
                     price_value=m.get("price_value"),
-                    query_used=_clip(reco_ctx["search_query"], 2000),
+                    query_used=_clip(search_query, 2000),
                     recommendation_image_url=_clip(m.get("image_url"), 2048),
                     recommendation_image_bytes=_download_image_bytes(m.get("image_url"), cfg.rec_image_timeout_sec),
-                    rationale=_clip(reco_ctx["rationale"], 4000),
+                    rationale=_clip(rationale, 4000),
                 )
             )
         req.pipeline_status = "ok" if rows else "no_products_found"
@@ -122,9 +184,27 @@ def process_catalog_from_image(
             req.error = f"supabase_storage_upload_error: {upload_error}"
         db.commit()
         db.refresh(req)
-        _notify_poke(style_signal, style_ranked, input_image_url=uploaded_public_url, request_id=req.id, cfg=cfg)
+        logger.info(
+            "[CATALOG] ── DONE ── id=%s, status=%s, garment=%s, brand=%s, confidence=%.2f, "
+            "results=%d, query='%s', source=%s",
+            req.id, req.pipeline_status, req.garment_name, req.brand_hint,
+            req.confidence, len(rows), search_query,
+            "lens" if lens_matches else "style_fallback",
+        )
+        for r in rows:
+            logger.info("[CATALOG]   #%d: %s | %s | %s", r.rank, r.title[:80], r.price_text, r.source)
+
+        # 5. Notify Poke — pass lens_ctx so it doesn't re-call Lens.
+        _notify_poke(
+            style_signal, ranked,
+            input_image_url=req.image_path,
+            request_id=req.id,
+            lens_ctx=lens_ctx,
+            cfg=cfg,
+        )
         return _to_response(req, rows)
     except Exception as exc:
+        logger.exception("[CATALOG] ── FAILED ── id=%s, error=%s", req.id, exc)
         req.pipeline_status = "pipeline_error"
         req.error = f"{type(exc).__name__}: {exc}"
         if upload_error:
@@ -139,6 +219,7 @@ def _notify_poke(
     ranked: list[dict[str, Any]],
     input_image_url: str | None = None,
     request_id: int | None = None,
+    lens_ctx: dict[str, Any] | None = None,
     cfg: CatalogConfig | None = None,
 ) -> None:
     """Send a vibey AI-generated message to Poke about what the user just captured."""
@@ -150,24 +231,15 @@ def _notify_poke(
         details = f"garment: {garment}"
         if brand:
             details += f", brand: {brand}"
-        lens_top: dict[str, Any] | None = None
-        if input_image_url:
-            lens_ctx = _lens_to_shopping_context(input_image_url, cfg or CatalogConfig())
-            if lens_ctx.get("description"):
-                details = str(lens_ctx["description"])
-            if lens_ctx.get("shopping"):
-                lens_top = lens_ctx["shopping"][0]
+
+        # Reuse lens context passed from the main pipeline (no duplicate API call).
+        if lens_ctx and lens_ctx.get("description"):
+            details = str(lens_ctx["description"])
 
         product_url = None
         image_url = None
         top_match = ""
-        if lens_top:
-            top_match = f"Top match: {lens_top.get('title', '')}"
-            if lens_top.get("price_text"):
-                top_match += f" ({lens_top.get('price_text')})"
-            product_url = lens_top.get("product_url")
-            image_url = lens_top.get("image_url")
-        elif ranked:
+        if ranked:
             top = ranked[0]
             top_match = f"Top match: {top.get('title', '')}"
             if top.get("price_text"):
@@ -220,13 +292,32 @@ def _lens_to_shopping_context(image_url: str, cfg: CatalogConfig) -> dict[str, A
         return {}
 
     visual = lens_data.get("visual_matches") or []
-    best = visual[0] if visual else {}
-    print(best)
-    best_title = _clean(best.get("title")) or _clean(lens_data.get("search_metadata", {}).get("status")) or "clothing item"
-    source = _clean(best.get("source"))
-    normalized = _normalize_lens_description(best_title, source)
-    shopping = _search_serp(normalized, cfg, max_results=5)
-    return {"description": normalized, "shopping": shopping}
+    top5 = visual[:5]
+    for i, v in enumerate(top5):
+        logger.info("[CATALOG] Lens visual match #%d: %s (source=%s)", i + 1, _clip(str(v.get("title")), 120), v.get("source"))
+
+    if not top5:
+        return {"description": "clothing item", "shopping": []}
+
+    # Try each visual match as a shopping query, first to fifth.
+    for i, match in enumerate(top5):
+        title = _clean(match.get("title")) or "clothing item"
+        source = _clean(match.get("source"))
+        query = _normalize_lens_description(title, source)
+        logger.info("[CATALOG] Lens shopping attempt #%d: query='%s'", i + 1, query)
+        shopping = _search_serp(query, cfg, max_results=5)
+        if shopping:
+            logger.info("[CATALOG] Lens attempt #%d returned %d results", i + 1, len(shopping))
+            return {"description": title, "shopping": shopping}
+        logger.info("[CATALOG] Lens attempt #%d returned 0 results", i + 1)
+
+    # All 5 specific queries failed — try a generic fallback with just garment keywords.
+    best_title = _clean(top5[0].get("title")) or "clothing item"
+    generic_tokens = _tokens(best_title)[:4]
+    generic_query = " ".join(generic_tokens) if generic_tokens else "clothing"
+    logger.info("[CATALOG] All 5 Lens queries returned 0, generic fallback: '%s'", generic_query)
+    shopping = _search_serp(generic_query, cfg, max_results=5)
+    return {"description": best_title, "shopping": shopping}
 
 
 def _normalize_lens_description(title: str, source: str | None) -> str:
@@ -353,6 +444,7 @@ def _search_serp(query: str, cfg: CatalogConfig, max_results: int) -> list[dict[
     api_key = os.getenv("SERPAPI_API_KEY")
     if not api_key:
         raise RuntimeError("SERPAPI_API_KEY is required")
+    logger.info("[SERP] Searching Google Shopping: q='%s', max=%d", query, max_results)
     params = {
         "engine": "google_shopping",
         "q": query,
@@ -364,6 +456,9 @@ def _search_serp(query: str, cfg: CatalogConfig, max_results: int) -> list[dict[
     resp = requests.get("https://serpapi.com/search.json", params=params, timeout=cfg.serp_timeout_sec)
     resp.raise_for_status()
     data = resp.json()
+    logger.info("[SERP] Response: %d shopping_results, search_id=%s",
+                len(data.get("shopping_results", [])),
+                data.get("search_metadata", {}).get("id", "?"))
     out: list[dict[str, Any]] = []
     for row in data.get("shopping_results", []):
         link = row.get("product_link") or row.get("link")

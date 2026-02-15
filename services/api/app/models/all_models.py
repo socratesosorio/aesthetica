@@ -123,6 +123,7 @@ class CatalogRequest(Base):
     brand_hint: Mapped[str | None] = mapped_column(String(255), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     error: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    image_path: Mapped[str | None] = mapped_column(Text(), nullable=True)
 
     recommendations: Mapped[list["CatalogRecommendation"]] = relationship(
         back_populates="request",
