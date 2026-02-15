@@ -5,6 +5,17 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class CatalogRequestOut(BaseModel):
+    id: str
+    created_at: datetime
+    image_path: str | None = None
+    pipeline_status: str
+    garment_name: str | None = None
+    brand_hint: str | None = None
+    confidence: float | None = None
+    error: str | None = None
+
+
 class CatalogRecommendationOut(BaseModel):
     rank: int
     title: str

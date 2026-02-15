@@ -2,8 +2,8 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
-import { Search, Sparkles, TrendingUp } from 'lucide-react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { ChevronLeft, ChevronRight, Link2, Search, Sparkles, TrendingUp } from 'lucide-react'
 
 import { TasteRadar } from '@/components/aesthetica/taste-radar'
 import { CvBodyBoxes, type RegionLabel } from '@/components/dashboard/cv-body-boxes'
@@ -14,21 +14,16 @@ import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { sampleTasteRadar } from '@/lib/aesthetica/sample-data'
 import { cn } from '@/lib/utils'
-import { api, ensureDevToken, getStoredToken, mediaUrl } from '@/lib/api'
-
-const kpis = [
-  { label: 'Captures (7d)', value: '18', meta: '+4 vs last week' },
-  { label: 'Matches generated', value: '420', meta: 'top‑K per garment' },
-  { label: 'Cheapest saved', value: '$69', meta: 'today' },
-  { label: 'Saved to buy', value: '26', meta: 'across captures' },
-  { label: 'Purchases (30d)', value: '6', meta: '$842 total' },
-] as const
-
-const recentPurchases = [
-  { item: 'Wide-leg trouser', retailer: 'Arket', price: '$119', when: '2 days', capture: '#0184' },
-  { item: 'Leather loafer', retailer: 'Vagabond', price: '$140', when: '8 days', capture: '#0184' },
-  { item: 'Overshirt', retailer: 'COS', price: '$145', when: '3 weeks', capture: '#0183' },
-] as const
+import {
+  api,
+  ApiError,
+  ensureDevToken,
+  getStoredToken,
+  logout,
+  mediaUrl,
+  type ApiCatalogRequestOut,
+  type ApiStyleScoreOut,
+} from '@/lib/api'
 
 const forYou = [
   { label: 'Relaxed neutral tailoring', meta: 'new arrivals' },
@@ -52,6 +47,7 @@ type ProductTile = {
   imageUrl?: string | null
   url?: string | null
   badge?: string | null
+  note?: string | null
 }
 
 type CheckedItem = ProductTile & {
@@ -123,6 +119,65 @@ function money(price: number | null | undefined, currency: string | null | undef
   } catch {
     return `$${Math.round(price)}`
   }
+}
+
+type KpiTile = { label: string; value: string; meta: string }
+
+function stableDiscountPercent(key: string) {
+  // Deterministic pseudo-random 1..30 based on a string key.
+  let h = 0
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0
+  return (Math.abs(h) % 30) + 1
+}
+
+function discountedPrice(price: number, pct: number) {
+  return Math.max(0, Math.round(price * (1 - pct / 100)))
+}
+
+function inflatedOriginalPrice(price: number, pct: number) {
+  // "Fake original" = (1 + discount%) * actual price
+  return Math.max(0, Math.round(price * (1 + pct / 100)))
+}
+
+function styleScoresToRadar(latest: ApiStyleScoreOut) {
+  const v = (n: number | null | undefined) => (typeof n === 'number' && Number.isFinite(n) ? n : 50)
+  return [
+    {
+      id: 'minimal_maximal' as const,
+      axis: 'Minimal',
+      leftLabel: 'Maximal',
+      rightLabel: 'Minimal',
+      value: v(latest.minimal),
+    },
+    {
+      id: 'structured_relaxed' as const,
+      axis: 'Structured',
+      leftLabel: 'Relaxed',
+      rightLabel: 'Structured',
+      value: v(latest.structured),
+    },
+    {
+      id: 'neutral_color' as const,
+      axis: 'Neutral',
+      leftLabel: 'Color-forward',
+      rightLabel: 'Neutral',
+      value: v(latest.neutral),
+    },
+    {
+      id: 'classic_experimental' as const,
+      axis: 'Classic',
+      leftLabel: 'Experimental',
+      rightLabel: 'Classic',
+      value: v(latest.classic),
+    },
+    {
+      id: 'casual_formal' as const,
+      axis: 'Casual',
+      leftLabel: 'Formal',
+      rightLabel: 'Casual',
+      value: v(latest.casual),
+    },
+  ]
 }
 
 const CHECKED_STORAGE_KEY = 'aesthetica_last_checked_v1'
@@ -202,19 +257,27 @@ function ProductCard({
   p,
   onChecked,
   source,
+  showDiscount,
 }: {
   p: ProductTile
   source: 'recommended' | 'capture'
   onChecked: (p: ProductTile, source: 'recommended' | 'capture') => void
+  showDiscount?: boolean
 }) {
+  const key = p.url || p.id || p.title
+  const pct = stableDiscountPercent(key)
+  const hasPrice = typeof p.price === 'number' && Number.isFinite(p.price)
+  const price = hasPrice ? p.price : null
+  const fakeOriginal = price != null ? inflatedOriginalPrice(price, pct) : null
+
   return (
     <a
       href={p.url || '#'}
       onClick={() => onChecked(p, source)}
       className={cn(
-        'group relative flex flex-col overflow-hidden rounded-xl border border-border/60 bg-background',
+        'group relative flex flex-col overflow-hidden rounded-3xl border border-border/50 bg-background/55 backdrop-blur-xl',
         'transition-[transform,box-shadow,border-color,background-color] duration-300 will-change-transform',
-        'hover:-translate-y-1 hover:shadow-xl hover:border-foreground/15 hover:bg-muted/30',
+        'hover:-translate-y-1 hover:shadow-2xl hover:border-foreground/15 hover:bg-muted/25',
       )}
     >
       <div className="relative aspect-[4/5] w-full overflow-hidden bg-muted">
@@ -238,7 +301,25 @@ function ProductCard({
       <div className="flex flex-1 flex-col gap-1 px-3 py-3">
         <div className="line-clamp-2 text-sm font-medium">{p.title}</div>
         <div className="text-muted-foreground text-xs">{p.brand || '—'}</div>
-        <div className="mt-1 text-sm font-semibold">{money(p.price, p.currency)}</div>
+        {p.note ? (
+          <div className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
+            {p.note}
+          </div>
+        ) : null}
+        {showDiscount && price != null && fakeOriginal != null ? (
+          <div className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <div className="text-sm font-semibold">{money(price, p.currency)}</div>
+            <div className="text-xs font-semibold text-red-600 line-through dark:text-red-400">
+              {money(fakeOriginal, p.currency)}
+            </div>
+            <div className="text-[10px] font-semibold tracking-wide text-red-600 dark:text-red-400">
+              SPECIAL DISCOUNT
+            </div>
+            <div className="text-xs font-medium text-red-600 dark:text-red-400">-{pct}%</div>
+          </div>
+        ) : (
+          <div className="mt-1 text-sm font-semibold">{money(p.price, p.currency)}</div>
+        )}
       </div>
     </a>
   )
@@ -294,26 +375,36 @@ function ProfileTopbar({
 }
 
 export default function ProfilePage() {
+  return (
+    <React.Suspense fallback={<main className="min-h-screen" />}>
+      <ProfilePageInner />
+    </React.Suspense>
+  )
+}
+
+function ProfilePageInner() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const captureParam = searchParams.get('capture')
   const [query, setQuery] = React.useState('')
   const [recent, setRecent] = React.useState<CaptureRow[]>([])
   const [recommended, setRecommended] = React.useState<ProductTile[]>([])
+  const [styleRecommended, setStyleRecommended] = React.useState<ProductTile[]>([])
   const [tasteRadar, setTasteRadar] = React.useState(sampleTasteRadar)
+  const [styleScores, setStyleScores] = React.useState<ApiStyleScoreOut[]>([])
+  const [styleScoreDescription, setStyleScoreDescription] = React.useState<string | null>(null)
   const [checked, setChecked] = React.useState<CheckedItem[]>([])
   const [loading, setLoading] = React.useState(true)
   const [selectedCaptureId, setSelectedCaptureId] = React.useState<string | null>(null)
   const [cvMode, setCvMode] = React.useState<'captures' | 'sample'>('captures')
+  const [copiedCaptureId, setCopiedCaptureId] = React.useState<string | null>(null)
 
   const heroView = useInViewOnce<HTMLDivElement>(0.08)
   const recentView = useInViewOnce<HTMLDivElement>(0.1)
   const lastCapturedView = useInViewOnce<HTMLDivElement>(0.1)
   const recsView = useInViewOnce<HTMLDivElement>(0.1)
-  const kpisView = useInViewOnce<HTMLDivElement>(0.12)
-  const belowView = useInViewOnce<HTMLDivElement>(0.12)
   const lastCheckedView = useInViewOnce<HTMLDivElement>(0.12)
   const radarView = useInViewOnce<HTMLDivElement>(0.12)
-  const purchasesView = useInViewOnce<HTMLDivElement>(0.12)
-  const savedView = useInViewOnce<HTMLDivElement>(0.12)
 
   React.useEffect(() => {
     setChecked(loadChecked())
@@ -324,8 +415,11 @@ export default function ProfilePage() {
       setSelectedCaptureId(null)
       return
     }
-    setSelectedCaptureId((cur) => (cur && recent.some((r) => r.id === cur) ? cur : recent[0]!.id))
-  }, [recent])
+    setSelectedCaptureId((cur) => {
+      if (captureParam && recent.some((r) => r.id === captureParam)) return captureParam
+      return cur && recent.some((r) => r.id === cur) ? cur : recent[0]!.id
+    })
+  }, [recent, captureParam])
 
   const onChecked = React.useCallback(
     (p: ProductTile, source: 'recommended' | 'capture') => {
@@ -369,101 +463,123 @@ export default function ProfilePage() {
       const autoDev = process.env.NEXT_PUBLIC_AUTO_DEV_LOGIN === 'true'
       const token = getStoredToken() || (autoDev ? await ensureDevToken(ctrl.signal) : null)
       if (!token) {
-        router.replace(`/login?next=${encodeURIComponent('/profile')}`)
+        const next = captureParam ? `/profile?capture=${encodeURIComponent(captureParam)}` : '/profile'
+        router.replace(`/login?next=${encodeURIComponent(next)}`)
         return
       }
 
-      const me = await api.me(token, ctrl.signal)
-      const [caps, recs, profile] = await Promise.all([
-        api.userCaptures(me.id, token, 10, ctrl.signal),
+      let me: { id: string } | null = null
+      try {
+        me = await api.me(token, ctrl.signal)
+      } catch (err) {
+        // Abort == navigation/unmount; don't treat as auth failure.
+        if (err && typeof err === 'object' && 'name' in err && (err as any).name === 'AbortError') return
+
+        // Only bounce to login on actual auth failures.
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          logout()
+          const next = captureParam ? `/profile?capture=${encodeURIComponent(captureParam)}` : '/profile'
+          router.replace(`/login?next=${encodeURIComponent(next)}`)
+          return
+        }
+
+        // For network/500s, stay on page (avoid redirect loop).
+        setLoading(false)
+        return
+      }
+
+      const [reqs, recs, styleRecs, scores, profile] = await Promise.all([
+        api.catalogRequests(token, 60, ctrl.signal).catch(() => []),
         api.catalogRecommendations(token, 24, ctrl.signal).catch(() => []),
+        api.styleRecommendations(token, 24, ctrl.signal).catch(() => []),
+        api.styleScores(token, 30, ctrl.signal).catch(() => []),
         api.userProfile(me.id, token, ctrl.signal),
       ])
 
       const profileRadar = profile?.radar_vector ?? {}
       const neutral = profileRadar.neutral_color_forward ?? profileRadar.neutral_color
-      setTasteRadar([
-        {
-          id: 'minimal_maximal',
-          axis: 'Minimal',
-          leftLabel: 'Minimal',
-          rightLabel: 'Maximal',
-          value: profileRadar.minimal_maximal ?? sampleTasteRadar[0]?.value ?? 50,
-        },
-        {
-          id: 'structured_relaxed',
-          axis: 'Structured',
-          leftLabel: 'Structured',
-          rightLabel: 'Relaxed',
-          value: profileRadar.structured_relaxed ?? sampleTasteRadar[1]?.value ?? 50,
-        },
-        {
-          id: 'neutral_color',
-          axis: 'Neutral',
-          leftLabel: 'Neutral',
-          rightLabel: 'Color-forward',
-          value: neutral ?? sampleTasteRadar[2]?.value ?? 50,
-        },
-        {
-          id: 'classic_experimental',
-          axis: 'Classic',
-          leftLabel: 'Classic',
-          rightLabel: 'Experimental',
-          value: profileRadar.classic_experimental ?? sampleTasteRadar[3]?.value ?? 50,
-        },
-        {
-          id: 'casual_formal',
-          axis: 'Casual',
-          leftLabel: 'Casual',
-          rightLabel: 'Formal',
-          value: profileRadar.casual_formal ?? sampleTasteRadar[4]?.value ?? 50,
-        },
-      ])
-
-      // Recent captures + correlated products
-      const capRows: CaptureRow[] = await Promise.all(
-        (caps ?? []).slice(0, 6).map(async (cap) => {
-          const created = new Date(cap.created_at)
-          const createdAtLabel = created.toLocaleString(undefined, {
-            month: 'short',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-          })
-
-          const capImage = cap.image_path ? mediaUrl(cap.image_path, token) : '/images/outfit-1.png'
-
-          const garmentTypes = Array.from(
-            new Set((cap.garments ?? []).map((g) => (g.garment_type || 'top').toLowerCase())),
-          )
-          const types = garmentTypes.length ? garmentTypes.slice(0, 3) : ['top']
-
-          const results = await Promise.all(
-            types.map((t) => api.productSearchByCapture(cap.id, t, token, 6, true, ctrl.signal).catch(() => [])),
-          )
-          const flattened = results.flat().slice(0, 8)
-          const products: ProductTile[] = flattened.map((p, idx) => ({
-            id: `${cap.id}_${p.product_id}_${idx}`,
-            title: p.title,
-            brand: p.brand,
-            price: p.price,
-            currency: p.currency,
-            imageUrl: p.image_url || null,
-            url: p.product_url,
-            badge: p.source === 'catalog' ? 'Local' : p.source ? 'Web' : null,
-          }))
-
-          return {
-            id: cap.id,
-            createdAtLabel,
-            status: cap.status,
-            imageUrl: capImage,
-            products,
-          }
-        }),
+      const latestStyle = (scores ?? [])[0]
+      setStyleScores(scores ?? [])
+      setStyleScoreDescription(latestStyle?.description ?? null)
+      setTasteRadar(
+        latestStyle
+          ? styleScoresToRadar(latestStyle)
+          : [
+              {
+                id: 'minimal_maximal',
+                axis: 'Minimal',
+                leftLabel: 'Minimal',
+                rightLabel: 'Maximal',
+                value: profileRadar.minimal_maximal ?? sampleTasteRadar[0]?.value ?? 50,
+              },
+              {
+                id: 'structured_relaxed',
+                axis: 'Structured',
+                leftLabel: 'Structured',
+                rightLabel: 'Relaxed',
+                value: profileRadar.structured_relaxed ?? sampleTasteRadar[1]?.value ?? 50,
+              },
+              {
+                id: 'neutral_color',
+                axis: 'Neutral',
+                leftLabel: 'Neutral',
+                rightLabel: 'Color-forward',
+                value: neutral ?? sampleTasteRadar[2]?.value ?? 50,
+              },
+              {
+                id: 'classic_experimental',
+                axis: 'Classic',
+                leftLabel: 'Classic',
+                rightLabel: 'Experimental',
+                value: profileRadar.classic_experimental ?? sampleTasteRadar[3]?.value ?? 50,
+              },
+              {
+                id: 'casual_formal',
+                axis: 'Casual',
+                leftLabel: 'Casual',
+                rightLabel: 'Formal',
+                value: profileRadar.casual_formal ?? sampleTasteRadar[4]?.value ?? 50,
+              },
+            ],
       )
 
-      setRecent(capRows)
+      async function buildRequestRow(req: ApiCatalogRequestOut): Promise<CaptureRow> {
+        const created = new Date(req.created_at)
+        const createdAtLabel = created.toLocaleString(undefined, {
+          month: 'short',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+
+        const reqImage = req.image_path
+          ? req.image_path.startsWith('http://') || req.image_path.startsWith('https://')
+            ? req.image_path
+            : mediaUrl(req.image_path, token)
+          : '/images/outfit-1.png'
+        return {
+          id: req.id,
+          createdAtLabel,
+          status: req.pipeline_status,
+          imageUrl: reqImage,
+          products: [],
+        }
+      }
+
+      // Recent "captures" (catalog requests) for images (skip NULL image_path rows)
+      const base = (reqs ?? []).filter((r) => !!r.image_path).slice(0, 6)
+      const capRows: CaptureRow[] = await Promise.all(base.map((r) => buildRequestRow(r)))
+
+      // If URL specifies a capture outside the first page, fetch/build it so it can be selected.
+      let extra: CaptureRow | null = null
+      if (captureParam && !capRows.some((r) => r.id === captureParam)) {
+        const reqObj =
+          (reqs ?? []).find((r) => r.id === captureParam) ??
+          (await api.catalogRequest(captureParam, token, ctrl.signal).catch(() => null))
+        if (reqObj && reqObj.image_path) extra = await buildRequestRow(reqObj)
+      }
+
+      setRecent(extra ? [extra, ...capRows] : capRows)
       setRecommended(
         (recs ?? []).map((r) => ({
           id: `${r.rank}_${r.product_url}`,
@@ -474,6 +590,20 @@ export default function ProfilePage() {
           imageUrl: r.recommendation_image_url || null,
           url: r.product_url,
           badge: r.price_text || r.source || 'Catalog',
+          note: r.query_used ? `Query: ${r.query_used}` : null,
+        })),
+      )
+      setStyleRecommended(
+        (styleRecs ?? []).map((r) => ({
+          id: `style_${r.rank}_${r.product_url}`,
+          title: r.title,
+          brand: r.source || 'Style trends',
+          price: r.price_value ?? null,
+          currency: 'USD',
+          imageUrl: r.recommendation_image_url || null,
+          url: r.product_url,
+          badge: r.price_text || r.source || 'Style',
+          note: r.rationale || null,
         })),
       )
       setLoading(false)
@@ -481,13 +611,19 @@ export default function ProfilePage() {
 
     load().catch(() => setLoading(false))
     return () => ctrl.abort()
-  }, [router])
+  }, [router, captureParam])
 
   const filteredRecommended = React.useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return recommended
     return recommended.filter((p) => `${p.title} ${p.brand ?? ''}`.toLowerCase().includes(q))
   }, [query, recommended])
+
+  const filteredStyleRecommended = React.useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return styleRecommended
+    return styleRecommended.filter((p) => `${p.title} ${p.brand ?? ''} ${p.note ?? ''}`.toLowerCase().includes(q))
+  }, [query, styleRecommended])
 
   const lastChecked = React.useMemo(() => checked.slice(0, 7), [checked])
   const selectedCapture = React.useMemo(
@@ -499,6 +635,7 @@ export default function ProfilePage() {
     [recent, selectedCapture],
   )
   const selectedProducts = selectedCapture?.products ?? []
+  const hasCaptures = recent.length > 0 && !!selectedCapture?.id
   const outfitKind = detectOutfitKind(selectedProducts)
   const topProduct = bestProductForRegion('top', selectedProducts, outfitKind)
   const bottomProduct = bestProductForRegion('bottom', selectedProducts, outfitKind)
@@ -537,11 +674,41 @@ export default function ProfilePage() {
       ? (['One-piece', 'Hem / legs', 'Shoes'] as const)
       : (['Top', 'Bottom', 'Shoes'] as const)
   const cvSrcRaw =
-    cvMode === 'captures' && selectedCapture?.imageUrl ? selectedCapture.imageUrl : '/images/outfit-6.png'
+    cvMode === 'captures' && selectedCapture?.imageUrl ? selectedCapture.imageUrl : '/images/outfit-1.png'
   const cvSrc = canvasSafeSrc(cvSrcRaw)
 
+  const copyShareLink = React.useCallback(async (captureId: string) => {
+    if (typeof window === 'undefined') return
+    const origin = window.location.origin
+    const url = `${origin}/profile?capture=${encodeURIComponent(captureId)}`
+    try {
+      await window.navigator.clipboard.writeText(url)
+      setCopiedCaptureId(captureId)
+      window.setTimeout(() => {
+        setCopiedCaptureId((cur) => (cur === captureId ? null : cur))
+      }, 1400)
+    } catch {
+      // ignore clipboard failures
+    }
+  }, [])
+
   return (
-    <main className="min-h-screen bg-background">
+    <main
+      className={cn(
+        'min-h-screen',
+        // Glass, but monochrome + sleek (black/white/gray).
+        'bg-[radial-gradient(900px_circle_at_10%_0%,rgba(0,0,0,0.06),transparent_60%),radial-gradient(900px_circle_at_90%_10%,rgba(0,0,0,0.04),transparent_60%),linear-gradient(to_bottom,rgba(255,255,255,0.86),rgba(245,245,245,0.92))]',
+        'dark:bg-[radial-gradient(900px_circle_at_10%_0%,rgba(255,255,255,0.06),transparent_60%),radial-gradient(900px_circle_at_90%_10%,rgba(255,255,255,0.04),transparent_60%),linear-gradient(to_bottom,rgba(0,0,0,0.70),rgba(0,0,0,0.86))]',
+        // Make all Cards extra-rounded + glassy without editing each one.
+        '[&_[data-slot=card]]:rounded-3xl [&_[data-slot=card]]:bg-background/55 [&_[data-slot=card]]:backdrop-blur-xl [&_[data-slot=card]]:border-border/50 [&_[data-slot=card]]:shadow-[0_32px_90px_rgba(0,0,0,0.18)]',
+        'dark:[&_[data-slot=card]]:bg-background/20 dark:[&_[data-slot=card]]:shadow-[0_38px_110px_rgba(0,0,0,0.68)]',
+        // 3D treatment: punchier shadows on interactive elements too.
+        '[&_button]:shadow-[0_14px_40px_rgba(0,0,0,0.14)] dark:[&_button]:shadow-[0_16px_46px_rgba(0,0,0,0.55)]',
+        '[&_a]:shadow-none',
+        '[&_.rounded-2xl]:shadow-[0_18px_55px_rgba(0,0,0,0.12)] dark:[&_.rounded-2xl]:shadow-[0_20px_60px_rgba(0,0,0,0.55)]',
+        '[&_img]:shadow-[0_14px_44px_rgba(0,0,0,0.12)] dark:[&_img]:shadow-[0_16px_50px_rgba(0,0,0,0.55)]',
+      )}
+    >
       <ProfileTopbar query={query} setQuery={setQuery} />
 
       <div className="mx-auto w-full max-w-[1600px] px-4 py-10 md:px-8">
@@ -587,6 +754,22 @@ export default function ProfilePage() {
                     ? `Showing ${selectedCapture.createdAtLabel} · ${selectedCapture.id}`
                     : 'No captures yet — using a sample image'}
                 </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 rounded-full px-3"
+                    onClick={() => {
+                      if (selectedCapture?.id) copyShareLink(selectedCapture.id)
+                    }}
+                    disabled={!selectedCapture?.id}
+                    title={selectedCapture?.id ? 'Copy share link' : 'Add a capture to enable sharing'}
+                  >
+                    <Link2 className="mr-2 size-4" />
+                    {copiedCaptureId === selectedCapture?.id ? 'Copied' : 'Share link'}
+                  </Button>
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -614,20 +797,21 @@ export default function ProfilePage() {
                   </Button>
                 </div>
 
-                {recent.length ? (
-                  <div className="flex items-center gap-1.5">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-8 rounded-full px-3"
-                      onClick={() => setSelectedCaptureId(recent[Math.max(0, selectedIndex - 1)]!.id)}
-                      disabled={selectedIndex <= 0}
-                    >
-                      Prev
-                    </Button>
-                    <div className="flex max-w-[52vw] items-center gap-1 overflow-x-auto rounded-full border border-border bg-background p-1">
-                      {recent.slice(0, 8).map((cap) => {
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 w-8 rounded-full p-0"
+                    onClick={() => setSelectedCaptureId(recent[Math.max(0, selectedIndex - 1)]!.id)}
+                    disabled={!hasCaptures || selectedIndex <= 0}
+                    title={hasCaptures ? 'Previous capture' : 'Add a capture to enable'}
+                  >
+                    <ChevronLeft className="size-4" />
+                  </Button>
+                  <div className="flex max-w-[52vw] items-center gap-1 overflow-x-auto rounded-full border border-border bg-background p-1">
+                    {recent.length ? (
+                      recent.slice(0, 8).map((cap) => {
                         const active = cap.id === selectedCapture?.id
                         return (
                           <Button
@@ -642,22 +826,23 @@ export default function ProfilePage() {
                             {cap.createdAtLabel}
                           </Button>
                         )
-                      })}
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-8 rounded-full px-3"
-                      onClick={() =>
-                        setSelectedCaptureId(recent[Math.min(recent.length - 1, selectedIndex + 1)]!.id)
-                      }
-                      disabled={selectedIndex < 0 || selectedIndex >= recent.length - 1}
-                    >
-                      Next
-                    </Button>
+                      })
+                    ) : (
+                      <div className="px-3 py-1 text-xs text-muted-foreground">No captures</div>
+                    )}
                   </div>
-                ) : null}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 w-8 rounded-full p-0"
+                    onClick={() => setSelectedCaptureId(recent[Math.min(recent.length - 1, selectedIndex + 1)]!.id)}
+                    disabled={!hasCaptures || selectedIndex < 0 || selectedIndex >= recent.length - 1}
+                    title={hasCaptures ? 'Next capture' : 'Add a capture to enable'}
+                  >
+                    <ChevronRight className="size-4" />
+                  </Button>
+                </div>
               </div>
             </div>
           </CardHeader>
@@ -769,6 +954,28 @@ export default function ProfilePage() {
                           <div className="text-muted-foreground mt-1 text-xs font-mono">
                             {cap.id}
                           </div>
+                          <div className="mt-2 flex items-center gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-8 rounded-full px-3"
+                              onClick={() => copyShareLink(cap.id)}
+                              title={copiedCaptureId === cap.id ? 'Copied link' : 'Copy share link'}
+                            >
+                              <Link2 className="mr-2 size-4" />
+                              {copiedCaptureId === cap.id ? 'Copied' : 'Share link'}
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-8 rounded-full px-3"
+                              onClick={() => setSelectedCaptureId(cap.id)}
+                            >
+                              View
+                            </Button>
+                          </div>
                         </div>
                       </div>
 
@@ -806,62 +1013,52 @@ export default function ProfilePage() {
           )}
         >
           <CardHeader className="pb-3">
-            <CardTitle className="text-2xl md:text-3xl">Recommended for you</CardTitle>
+            <CardTitle className="text-2xl md:text-3xl">Recommended for you · last capture</CardTitle>
           </CardHeader>
           <CardContent className="pt-0">
             <div className="mb-4 flex flex-wrap items-center gap-2">
-              <Badge variant="secondary">Trending + taste</Badge>
-              <Badge variant="secondary">Fast picks</Badge>
-              <Badge variant="secondary">Marketplace-style grid</Badge>
+              <Badge variant="secondary">Based on your last capture</Badge>
+              <Badge variant="secondary">Supabase-backed</Badge>
+              <Badge variant="secondary">catalog_recommendations</Badge>
             </div>
             <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-6">
               {filteredRecommended.slice(0, 18).map((p) => (
-                <ProductCard key={p.id} p={p} source="recommended" onChecked={onChecked} />
+                <ProductCard key={p.id} p={p} source="recommended" onChecked={onChecked} showDiscount />
               ))}
             </div>
           </CardContent>
         </Card>
 
-        {/* Bring back original dashboard sections below */}
-        <div
-          ref={belowView.ref}
+        <Card
           className={cn(
-            belowView.inView ? 'animate-reveal-up animation-delay-200' : 'opacity-0 motion-reduce:opacity-100',
+            'mt-4 overflow-hidden transition-[transform,box-shadow,opacity] duration-500 will-change-transform',
+            recsView.inView ? 'animate-reveal-up animation-delay-300' : 'opacity-0 motion-reduce:opacity-100',
+            loading && 'opacity-80',
           )}
         >
-          <Separator className="my-10" />
-        </div>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-2xl md:text-3xl">Recommended for you · style trends</CardTitle>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <Badge variant="secondary">Based on your overall style trends</Badge>
+              <Badge variant="secondary">Supabase-backed</Badge>
+              <Badge variant="secondary">style_recommendations</Badge>
+            </div>
+            <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 2xl:grid-cols-6">
+              {filteredStyleRecommended.slice(0, 18).map((p) => (
+                <ProductCard key={p.id} p={p} source="recommended" onChecked={onChecked} showDiscount />
+              ))}
+            </div>
+            {!filteredStyleRecommended.length ? (
+              <div className="text-muted-foreground mt-4 text-sm">
+                No style trend recommendations yet. Once `style_scores` and `style_recommendations` are populated, they’ll show up here.
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
 
-        {/* KPI tiles */}
-        <div ref={kpisView.ref} className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-          {kpis.map((kpi, idx) => (
-            <Card
-              key={kpi.label}
-              className={cn(
-                'group overflow-hidden transition-[transform,box-shadow,opacity] duration-300 will-change-transform',
-                'hover:-translate-y-0.5 hover:shadow-lg hover:border-foreground/15',
-                kpisView.inView ? 'animate-scale-in' : 'opacity-0 motion-reduce:opacity-100',
-                idx === 0 ? 'animation-delay-100' : '',
-                idx === 1 ? 'animation-delay-200' : '',
-                idx === 2 ? 'animation-delay-300' : '',
-                idx === 3 ? 'animation-delay-400' : '',
-                idx === 4 ? 'animation-delay-500' : '',
-              )}
-            >
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
-                  {kpi.label}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-semibold tracking-tight md:text-4xl">
-                  {kpi.value}
-                </div>
-                <div className="text-muted-foreground mt-1 text-xs">{kpi.meta}</div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
+        <Separator className="my-10" />
 
         <div className="mt-8 grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
           {/* Last checked items/styles */}
@@ -934,6 +1131,18 @@ export default function ProfilePage() {
               <CardTitle className="text-2xl md:text-3xl">Taste Radar</CardTitle>
             </CardHeader>
             <CardContent className="min-w-0">
+              {styleScoreDescription ? (
+                <div className="mb-4 rounded-2xl border border-border/50 bg-background/35 p-4 text-sm leading-relaxed text-muted-foreground">
+                  {styleScoreDescription}
+                  <div className="mt-2 text-xs">
+                    Source: <span className="font-medium text-foreground">{styleScores.length ? 'style_scores' : 'user_profiles'}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="mb-4 text-xs text-muted-foreground">
+                  Source: <span className="font-medium text-foreground">{styleScores.length ? 'style_scores' : 'user_profiles'}</span>
+                </div>
+              )}
               <TasteRadar data={tasteRadar} className="aspect-auto h-[520px] w-full" />
               <Separator className="my-4" />
               <div className="flex flex-wrap gap-2">
@@ -947,81 +1156,6 @@ export default function ProfilePage() {
           </Card>
         </div>
 
-        <div className="mt-6 grid gap-4 xl:grid-cols-3">
-          {/* Recent purchases (restored mocked section) */}
-          <Card
-            ref={purchasesView.ref as any}
-            className={cn(
-              'overflow-hidden transition-opacity duration-500',
-              purchasesView.inView ? 'animate-reveal-up animation-delay-200' : 'opacity-0 motion-reduce:opacity-100',
-            )}
-          >
-            <CardHeader>
-              <CardTitle className="text-2xl md:text-3xl">Recent purchases</CardTitle>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-2">
-              {recentPurchases.map((p) => (
-                <div
-                  key={`${p.item}_${p.when}`}
-                  className="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-4 py-3"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate text-base font-medium">{p.item}</div>
-                    <div className="text-muted-foreground mt-1 text-xs">
-                      {p.retailer} · {p.when} ago · {p.capture}
-                    </div>
-                  </div>
-                  <div className="text-muted-foreground text-sm">{p.price}</div>
-                </div>
-              ))}
-              <Separator className="my-2" />
-              <div className="text-muted-foreground text-xs">
-                Purchases are mocked for now; integrations can power this later.
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Saved items (restored) */}
-          <Card
-            ref={savedView.ref as any}
-            className={cn(
-              'overflow-hidden xl:col-span-2 transition-opacity duration-500',
-              savedView.inView ? 'animate-reveal-up animation-delay-300' : 'opacity-0 motion-reduce:opacity-100',
-            )}
-          >
-            <CardHeader>
-              <CardTitle className="text-2xl md:text-3xl">Saved items</CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {checked.slice(0, 6).map((row) => (
-                  <div
-                    key={`${row.id}_${row.checkedAtISO}_saved`}
-                    className="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-4 py-3 transition-colors hover:bg-muted/50"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{row.title}</div>
-                      <div className="text-muted-foreground mt-1 text-xs">
-                        {row.brand || '—'}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="text-sm font-semibold">
-                        {money(row.price, row.currency)}
-                      </div>
-                      <Button size="sm" variant="outline" className="h-8" asChild>
-                        <a href={row.url || '#'}>Buy</a>
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              {!checked.length ? (
-                <div className="text-muted-foreground text-sm">
-                  Save items by generating matches from a capture.
-                </div>
-              ) : null}
-            </CardContent>
-          </Card>
-        </div>
       </div>
     </main>
   )

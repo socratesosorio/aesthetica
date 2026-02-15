@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { api, getStoredToken, loginWithPassword, logout } from '@/lib/api'
+import { ApiError, api, getStoredToken, loginWithPassword, logout } from '@/lib/api'
 
 export default function LoginClient() {
   const router = useRouter()
@@ -29,8 +29,9 @@ export default function LoginClient() {
       try {
         await api.me(token, ctrl.signal)
         router.replace(next)
-      } catch {
-        logout()
+      } catch (err) {
+        if (err && typeof err === 'object' && 'name' in err && (err as any).name === 'AbortError') return
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) logout()
       }
     }
     maybeSkip()

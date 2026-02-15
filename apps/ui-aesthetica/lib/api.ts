@@ -48,6 +48,43 @@ export type ApiCatalogRecommendationOut = {
   has_recommendation_image_bytes: boolean
 }
 
+export type ApiCatalogRequestOut = {
+  id: string
+  created_at: string
+  image_path: string | null
+  pipeline_status: string
+  garment_name?: string | null
+  brand_hint?: string | null
+  confidence?: number | null
+  error?: string | null
+}
+
+export type ApiStyleScoreOut = {
+  id: string
+  request_id: string
+  created_at: string
+  description?: string | null
+  has_image_bytes: boolean
+  casual?: number | null
+  minimal?: number | null
+  structured?: number | null
+  classic?: number | null
+  neutral?: number | null
+}
+
+export type ApiStyleRecommendationOut = {
+  rank: number
+  title: string
+  product_url: string
+  source?: string | null
+  price_text?: string | null
+  price_value?: number | null
+  query_used?: string | null
+  recommendation_image_url?: string | null
+  has_recommendation_image_bytes: boolean
+  rationale?: string | null
+}
+
 export type ApiProductSearchOut = {
   product_id: string
   title: string
@@ -83,6 +120,20 @@ const TOKEN_STORAGE_KEY = 'aesthetica_access_token'
 
 function isBrowser() {
   return typeof window !== 'undefined'
+}
+
+export class ApiError extends Error {
+  status: number
+  statusText: string
+  bodyText: string
+
+  constructor(status: number, statusText: string, bodyText: string) {
+    super(`API ${status} ${statusText}: ${bodyText}`)
+    this.name = 'ApiError'
+    this.status = status
+    this.statusText = statusText
+    this.bodyText = bodyText
+  }
 }
 
 export function getStoredToken(): string | null {
@@ -126,7 +177,7 @@ async function apiFetch<T>(
 
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`API ${res.status} ${res.statusText}: ${text}`)
+    throw new ApiError(res.status, res.statusText, text)
   }
 
   return (await res.json()) as T
@@ -164,6 +215,10 @@ export const api = {
   baseUrl: API_BASE_URL,
   me: (token: string, signal?: AbortSignal) =>
     apiFetch<ApiUserOut>('/v1/auth/me', { token, signal }),
+  capture: (captureId: string, token: string, signal?: AbortSignal) =>
+    apiFetch<ApiCaptureOut>(`/v1/captures/${encodeURIComponent(captureId)}`, { token, signal }),
+  catalogRequest: (requestId: string, token: string, signal?: AbortSignal) =>
+    apiFetch<ApiCatalogRequestOut>(`/v1/catalog/requests/${encodeURIComponent(requestId)}`, { token, signal }),
   userCaptures: (userId: string, token: string, limit = 20, signal?: AbortSignal) =>
     apiFetch<ApiCaptureOut[]>(`/v1/users/${encodeURIComponent(userId)}/captures?limit=${limit}`, {
       token,
@@ -178,6 +233,12 @@ export const api = {
     ),
   catalogRecommendations: (token: string, limit = 24, signal?: AbortSignal) =>
     apiFetch<ApiCatalogRecommendationOut[]>(`/v1/catalog/recommendations?limit=${limit}`, { token, signal }),
+  catalogRequests: (token: string, limit = 24, signal?: AbortSignal) =>
+    apiFetch<ApiCatalogRequestOut[]>(`/v1/catalog/requests?limit=${limit}`, { token, signal }),
+  styleScores: (token: string, limit = 30, signal?: AbortSignal) =>
+    apiFetch<ApiStyleScoreOut[]>(`/v1/style/scores?limit=${limit}`, { token, signal }),
+  styleRecommendations: (token: string, limit = 24, signal?: AbortSignal) =>
+    apiFetch<ApiStyleRecommendationOut[]>(`/v1/style/recommendations?limit=${limit}`, { token, signal }),
   productSearchByCapture: (
     captureId: string,
     garmentType: string,
