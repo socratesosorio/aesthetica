@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class CatalogConfig:
     top_k: int = 5
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5.2"
     openai_timeout_sec: int = 25
     serp_timeout_sec: int = 20
     rec_image_timeout_sec: int = 8
@@ -50,14 +50,17 @@ def process_catalog_from_image(
     db.commit()
     db.refresh(req)
 
+    uploaded_public_url: str | None = None
     upload_error: str | None = None
     try:
-        upload_catalog_input_image(
+        upload_res = upload_catalog_input_image(
             request_id=req.id,
             image_bytes=image_bytes,
             content_type=content_type,
             filename=filename,
         )
+        if upload_res is not None:
+            uploaded_public_url = upload_res.public_url
     except Exception as exc:
         upload_error = f"{type(exc).__name__}: {exc}"
 
@@ -119,7 +122,7 @@ def process_catalog_from_image(
             req.error = f"supabase_storage_upload_error: {upload_error}"
         db.commit()
         db.refresh(req)
-        _notify_poke(style_signal, style_ranked)
+        _notify_poke(style_signal, style_ranked, input_image_url=uploaded_public_url, cfg=cfg)
         return _to_response(req, rows)
     except Exception as exc:
         req.pipeline_status = "pipeline_error"
@@ -131,26 +134,35 @@ def process_catalog_from_image(
         return _to_response(req, [])
 
 
-def _notify_poke(signal: dict[str, Any], ranked: list[dict[str, Any]]) -> None:
+def _notify_poke(
+    signal: dict[str, Any],
+    ranked: list[dict[str, Any]],
+    input_image_url: str | None = None,
+    cfg: CatalogConfig | None = None,
+) -> None:
     """Send a vibey AI-generated message to Poke about what the user just captured."""
     try:
         garment = signal.get("garment_name") or "fit"
         brand = signal.get("brand_hint")
-        color = signal.get("color_hint")
-        tags = signal.get("style_tags", [])
-
-        # Build context for OpenAI
         details = f"garment: {garment}"
         if brand:
             details += f", brand: {brand}"
-        if color:
-            details += f", color: {color}"
-        if tags:
-            details += f", style: {', '.join(tags[:3])}"
+        lens_top: dict[str, Any] | None = None
+        if input_image_url:
+            lens_ctx = _lens_to_shopping_context(input_image_url, cfg or CatalogConfig())
+            if lens_ctx.get("description"):
+                details = str(lens_ctx["description"])
+            if lens_ctx.get("shopping"):
+                lens_top = lens_ctx["shopping"][0]
 
         top_match = ""
         image_url = None
-        if ranked:
+        if lens_top:
+            top_match = f"Top match: {lens_top.get('title', '')}"
+            if lens_top.get("price_text"):
+                top_match += f" ({lens_top.get('price_text')})"
+            image_url = lens_top.get("image_url")
+        elif ranked:
             top = ranked[0]
             title = top.get("title", "")
             price = top.get("price_text")
@@ -170,6 +182,64 @@ def _notify_poke(signal: dict[str, Any], ranked: list[dict[str, Any]]) -> None:
         PokeNotifier().send(msg, image_url=image_url)
     except Exception:
         logger.exception("poke_notify_failed")
+
+
+def _lens_to_shopping_context(image_url: str, cfg: CatalogConfig) -> dict[str, Any]:
+    api_key = os.getenv("SERPAPI_API_KEY")
+    if not api_key:
+        return {}
+    lens_params = {
+        "engine": "google_lens",
+        "url": image_url,
+        "api_key": api_key,
+        "hl": "en",
+        "gl": "us",
+    }
+    try:
+        resp = requests.get("https://serpapi.com/search.json", params=lens_params, timeout=cfg.serp_timeout_sec)
+        resp.raise_for_status()
+        lens_data = resp.json()
+    except Exception:
+        return {}
+
+    visual = lens_data.get("visual_matches") or []
+    best = visual[0] if visual else {}
+    best_title = _clean(best.get("title")) or _clean(lens_data.get("search_metadata", {}).get("status")) or "clothing item"
+    source = _clean(best.get("source"))
+    normalized = _normalize_lens_description(best_title, source)
+    shopping = _search_serp(normalized, cfg, max_results=5)
+    return {"description": normalized, "shopping": shopping}
+
+
+def _normalize_lens_description(title: str, source: str | None) -> str:
+    text = re.sub(r"[\[\]\(\)\|]+", " ", title).strip()
+    text = re.sub(r"\s+", " ", text)
+    tokens = _tokens(text)
+    keep: list[str] = []
+    drop = {
+        "buy",
+        "sale",
+        "shop",
+        "new",
+        "mens",
+        "womens",
+        "women",
+        "men",
+        "official",
+        "store",
+        "free",
+        "shipping",
+    }
+    for t in tokens:
+        if t in drop:
+            continue
+        if len(keep) >= 8:
+            break
+        keep.append(t)
+    normalized = " ".join(keep).strip()
+    if source and source.lower() not in normalized.lower():
+        normalized = f"{source} {normalized}".strip()
+    return normalized or text or "clothing item"
 
 
 def _generate_poke_opener(garment_details: str) -> str:
