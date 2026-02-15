@@ -1,6 +1,6 @@
 COMPOSE=docker compose -f infra/docker-compose.yml
 
-.PHONY: dev down logs test embed-products reindex migrate seed
+.PHONY: dev down logs test test-web-detection embed-products reindex migrate seed
 
 dev:
 	$(COMPOSE) up --build
@@ -13,6 +13,9 @@ logs:
 
 test:
 	$(COMPOSE) run --rm api pytest -q
+
+test-web-detection:
+	pytest tests/web_detection/ -v --tb=long -s
 
 embed-products:
 	$(COMPOSE) run --rm api python /app/services/ml/scripts/embed_products.py

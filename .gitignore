@@ -25,5 +25,9 @@ data/uploads/*
 data/faiss/*
 !data/faiss/.gitkeep
 
+# Test images (downloaded, not committed)
+tests/web_detection/test_images/*
+!tests/web_detection/test_images/.gitkeep
+
 # Logs
 *.log
