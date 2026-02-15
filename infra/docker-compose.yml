@@ -94,6 +94,29 @@ services:
       - ..:/app
     command: ["celery", "-A", "worker.tasks", "worker", "--loglevel=INFO", "-Q", "captures"]
 
+  poke-mcp:
+    build:
+      context: ..
+      dockerfile: services/poke-mcp/Dockerfile
+    container_name: aesthetica-poke-mcp
+    env_file:
+      - ../.env
+    environment:
+      PYTHONPATH: /app/services/api:/app/services/ml:/app/services/poke-mcp
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/aesthetica
+      REDIS_URL: redis://redis:6379/0
+      LOCAL_STORAGE_ROOT: /app/data/uploads
+      FAISS_DIR: /app/data/faiss
+      PRODUCT_CSV_PATH: /app/data/products.csv
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${POKE_MCP_PORT:-8787}:8787"
+    volumes:
+      - ..:/app
+    command: ["python", "services/poke-mcp/server.py"]
+
 volumes:
   pgdata:
   minio_data:

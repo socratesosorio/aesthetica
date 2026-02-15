@@ -150,3 +150,8 @@ make down
 - Only local catalog products appear in matches:
   - Set `SERPAPI_API_KEY` in `.env`.
   - Ensure outbound network access from API container.
+- Poke messages not arriving:
+  - Set `POKE_API_KEY` in `.env`.
+  - Keep `POKE_WEBHOOK_URL=https://poke.com/api/v1/inbound/api-message`.
+  - In Poke dashboard: Settings → Advanced → create API key (not a JWT session token).
+  - You can also add an integration in Poke: Settings → Connections → Integrations → New → use the generated API key with the same `POKE_WEBHOOK_URL`.

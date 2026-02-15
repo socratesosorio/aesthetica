@@ -196,6 +196,7 @@ POKE INTEGRATION REQUIREMENTS
   POST https://poke.com/api/v1/inbound/api-message
   Header: Authorization: Bearer ${POKE_API_KEY}
   Body: {"message": "..."}
+  Integration path: create API key in Poke (Settings → Advanced) and configure the integration in Poke’s Connections if desired; backend only needs the API key + endpoint.
 - If POKE_API_KEY is missing, log warning and skip send (do not fail pipeline).
 - Message format MUST be:
   1) One-line aesthetic summary (generated from attributes + radar)
