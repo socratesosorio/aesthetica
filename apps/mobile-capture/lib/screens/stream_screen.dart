@@ -1,13 +1,16 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
 import '../services/dat_service.dart';
 import '../services/mock_dat_service.dart';
+import '../services/snap_detector_service.dart';
 import '../services/stream_relay_service.dart';
+import '../widgets/glass_container.dart';
 import '../widgets/reticle_overlay.dart';
 
 /// Real-time streaming screen that pipes DAT video frames from the Meta
@@ -27,6 +30,7 @@ class _StreamScreenState extends State<StreamScreen>
   late final DatService _dat;
   late final StreamRelayService _relay;
   late final FlutterTts _tts;
+  late final SnapDetectorService _snapDetector;
 
   // ── subscriptions ─────────────────────────────────────────────────────
 
@@ -47,6 +51,7 @@ class _StreamScreenState extends State<StreamScreen>
   bool _isKeyframe = false;
   Map<String, dynamic> _serverStats = {};
   bool _audioEnabled = true;
+  bool _snapEnabled = true;
   int _photoCaptureCount = 0;
   bool _showCaptureFlash = false;
 
@@ -88,6 +93,12 @@ class _StreamScreenState extends State<StreamScreen>
     _tts.setPitch(1.0);
     _tts.setVolume(1.0);
 
+    _snapDetector = SnapDetectorService(
+      requireDoubleSnap: true,
+      cooldownMs: 2000,
+      onSnap: _onSnapDetected,
+    );
+
     final apiBase = _apiBaseUrlOverride.isNotEmpty
         ? _apiBaseUrlOverride
         : _defaultApiBaseUrl;
@@ -96,7 +107,7 @@ class _StreamScreenState extends State<StreamScreen>
       baseUrl: apiBase,
       authToken:
           const String.fromEnvironment('API_TOKEN', defaultValue: 'dev'),
-      targetFps: 15,
+      targetFps: 30,
     );
 
     _start();
@@ -122,8 +133,8 @@ class _StreamScreenState extends State<StreamScreen>
       await _dat.requestCameraPermission();
       debugPrint('[Aesthetica] Camera permission granted.');
 
-      debugPrint('[Aesthetica] Starting DAT stream (1920x1080 @30fps)...');
-      await _dat.startStream(width: 1920, height: 1080, fps: 30);
+      debugPrint('[Aesthetica] Starting DAT stream (2592x1944 @60fps)...');
+      await _dat.startStream(width: 2592, height: 1944, fps: 60);
       debugPrint('[Aesthetica] DAT stream started.');
 
       // 2. Connect relay WebSocket.
@@ -164,6 +175,19 @@ class _StreamScreenState extends State<StreamScreen>
       });
       debugPrint('[Aesthetica] Subscribed to photo capture stream.');
 
+      // 3c. Start snap detector (uses glasses Bluetooth HFP mic).
+      debugPrint('[Aesthetica] Snap detector enabled=$_snapEnabled');
+      if (_snapEnabled) {
+        try {
+          debugPrint('[Aesthetica] Starting snap detector...');
+          await _snapDetector.start();
+          debugPrint('[Aesthetica] ✓ Snap detector started. isRunning=${_snapDetector.isRunning}');
+        } catch (e, stack) {
+          debugPrint('[Aesthetica] ✗ Snap detector failed to start: $e');
+          debugPrint('[Aesthetica] Stack: $stack');
+        }
+      }
+
       // 4. Subscribe to relay events.
       _resultSub = _relay.results.listen((result) {
         if (!mounted) return;
@@ -201,6 +225,50 @@ class _StreamScreenState extends State<StreamScreen>
         _lastError = e.toString();
       });
     }
+  }
+
+  /// Called when the snap detector fires (double finger snap on glasses mic).
+  void _onSnapDetected() {
+    final ts = DateTime.now().toIso8601String();
+    debugPrint('[Aesthetica][$ts] ★ SNAP DETECTED callback fired! '
+        'mounted=$mounted, snapEnabled=$_snapEnabled, '
+        'photoCaptureCount=$_photoCaptureCount');
+
+    if (!mounted) {
+      debugPrint('[Aesthetica] Ignoring snap — widget not mounted.');
+      return;
+    }
+
+    // Trigger the DAT capture (same as the in-app capture button).
+    debugPrint('[Aesthetica] Calling _dat.capturePhoto() from snap trigger...');
+    _dat.capturePhoto().then((_) {
+      debugPrint('[Aesthetica] ✓ Snap-triggered capturePhoto() succeeded');
+    }).catchError((e) {
+      debugPrint('[Aesthetica] ✗ Snap-triggered capturePhoto() error: $e');
+      // Fallback: send the current preview frame as a hi-res capture.
+      if (_currentFrame != null) {
+        debugPrint('[Aesthetica] Fallback: sending current preview frame '
+            '(${_currentFrame!.length} bytes) to relay');
+        _relay.sendFrame(_currentFrame!);
+      } else {
+        debugPrint('[Aesthetica] Fallback failed: no current frame available');
+      }
+    });
+
+    // Visual + audio feedback.
+    setState(() {
+      _photoCaptureCount++;
+      _showCaptureFlash = true;
+    });
+    debugPrint('[Aesthetica] Flash shown, photoCaptureCount=$_photoCaptureCount');
+
+    if (_audioEnabled) {
+      _tts.speak('Snap captured');
+      debugPrint('[Aesthetica] TTS: "Snap captured"');
+    }
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (mounted) setState(() => _showCaptureFlash = false);
+    });
   }
 
   /// Build a natural-language description and speak it via TTS.
@@ -242,6 +310,7 @@ class _StreamScreenState extends State<StreamScreen>
     _stateSub?.cancel();
     _serverStatsSub?.cancel();
     _tts.stop();
+    _snapDetector.dispose();
     _dat.stopStream();
     _relay.dispose();
     _flashController.dispose();
@@ -269,231 +338,359 @@ class _StreamScreenState extends State<StreamScreen>
     };
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0D1414),
-      body: SafeArea(
-        child: Column(
+      backgroundColor: Colors.transparent,
+      body: AestheticaBackground(
+        child: Stack(
           children: [
-            // ── header ──────────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              child: Row(
-                children: [
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: BoxDecoration(
-                      color: statusColor,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    statusLabel,
-                    style: TextStyle(
-                      color: statusColor,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                    ),
-                  ),
-                  const Spacer(),
-                  const Text(
-                    'Aesthetica Live',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFFFAF7EF),
-                    ),
-                  ),
-                  const Spacer(),
-                  // Frame counter.
-                  Text(
-                    '#$_ackSeq',
-                    style: const TextStyle(
-                      color: Color(0xFFAFA79A),
-                      fontSize: 12,
-                      fontFamily: 'monospace',
-                    ),
-                  ),
-                ],
-              ),
+            // Background glow orbs.
+            const GlowOrb(
+              color: Color(0xFF1A5C6B),
+              size: 280,
+              alignment: Alignment(1.2, -0.5),
+              opacity: 0.08,
+            ),
+            const GlowOrb(
+              color: Color(0xFF3CE37D),
+              size: 200,
+              alignment: Alignment(-1.0, 1.0),
+              opacity: 0.05,
             ),
 
-            // ── video preview ───────────────────────────────────────
-            Expanded(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  // Background.
-                  Container(color: const Color(0xFF111A1A)),
-
-                  // DAT frame preview.
-                  if (_currentFrame != null)
-                    Image.memory(
-                      _currentFrame!,
-                      fit: BoxFit.cover,
-                      gaplessPlayback: true,
-                    ),
-
-                  // Reticle overlay.
-                  const ReticleOverlay(),
-
-                  // Keyframe flash indicator.
-                  AnimatedBuilder(
-                    animation: _flashAnimation,
-                    builder: (context, child) {
-                      return IgnorePointer(
-                        child: Container(
-                          decoration: BoxDecoration(
-                            border: Border.all(
-                              color: const Color(0xFF3CE37D)
-                                  .withOpacity(_flashAnimation.value * 0.6),
-                              width: 4,
-                            ),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-
-                  // Capture flash overlay.
-                  if (_showCaptureFlash)
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: AnimatedOpacity(
-                          opacity: _showCaptureFlash ? 0.7 : 0.0,
-                          duration: const Duration(milliseconds: 150),
-                          child: Container(color: Colors.white),
-                        ),
-                      ),
-                    ),
-
-                  // Garment detection chips.
-                  if (_latestResult != null &&
-                      _latestResult!.garments.isNotEmpty)
-                    Positioned(
-                      top: 12,
-                      left: 12,
-                      right: 12,
-                      child: Wrap(
-                        spacing: 6,
-                        runSpacing: 6,
-                        children: _latestResult!.garments.map((g) {
-                          return _GarmentChip(
-                            garmentType: g.garmentType,
-                            attributes: g.attributes,
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-
-            // ── stats bar ───────────────────────────────────────────
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              color: const Color(0xFF141E1E),
+            SafeArea(
               child: Column(
                 children: [
-                  // Server stats row.
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      _StatTile(
-                        label: 'FPS',
-                        value: _serverStats['effective_fps']?.toString() ??
-                            '—',
-                      ),
-                      _StatTile(
-                        label: 'Keyframes',
-                        value:
-                            _serverStats['keyframes_detected']?.toString() ??
-                                '0',
-                      ),
-                      _StatTile(
-                        label: 'Processing',
-                        value: _serverStats['avg_processing_ms'] != null
-                            ? '${_serverStats['avg_processing_ms']}ms'
-                            : '—',
-                      ),
-                      _StatTile(
-                        label: 'Sent',
-                        value: '${_relay.framesSent}',
-                      ),
-                      _StatTile(
-                        label: 'Photos',
-                        value: '$_photoCaptureCount',
-                      ),
-                    ],
+                  // ── header glass bar ──────────────────────────────
+                  GlassContainer(
+                    margin: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    borderRadius: 18,
+                    child: Row(
+                      children: [
+                        GestureDetector(
+                          onTap: () => Navigator.maybePop(context),
+                          child: Icon(
+                            Icons.arrow_back_ios_new,
+                            size: 14,
+                            color: Colors.white.withOpacity(0.6),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        // Status dot with glow.
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: statusColor,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: statusColor.withOpacity(0.5),
+                                blurRadius: 8,
+                                spreadRadius: 1,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          statusLabel,
+                          style: TextStyle(
+                            color: statusColor,
+                            fontWeight: FontWeight.w500,
+                            fontSize: 12,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                        const Spacer(),
+                        const Text(
+                          'LIVE',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w200,
+                            color: Color(0xFFF0EDE5),
+                            letterSpacing: 3.0,
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          '#$_ackSeq',
+                          style: TextStyle(
+                            color: const Color(0xFFAFA79A).withOpacity(0.6),
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 10),
 
-                  // Latest inference summary.
+                  // ── video preview ───────────────────────────────────
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 4),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(20),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Container(
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF0A1214),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                            ),
+                            if (_currentFrame != null)
+                              Image.memory(
+                                _currentFrame!,
+                                fit: BoxFit.cover,
+                                gaplessPlayback: true,
+                              ),
+                            const ReticleOverlay(),
+
+                            // Keyframe flash indicator.
+                            AnimatedBuilder(
+                              animation: _flashAnimation,
+                              builder: (context, child) {
+                                return IgnorePointer(
+                                  child: Container(
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                        color: const Color(0xFF3CE37D)
+                                            .withOpacity(
+                                                _flashAnimation.value * 0.5),
+                                        width: 3,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+
+                            // Capture flash overlay.
+                            if (_showCaptureFlash)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: AnimatedOpacity(
+                                    opacity: _showCaptureFlash ? 0.5 : 0.0,
+                                    duration:
+                                        const Duration(milliseconds: 150),
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        borderRadius:
+                                            BorderRadius.circular(20),
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+
+                            // Garment detection chips.
+                            if (_latestResult != null &&
+                                _latestResult!.garments.isNotEmpty)
+                              Positioned(
+                                top: 12,
+                                left: 12,
+                                right: 12,
+                                child: Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children:
+                                      _latestResult!.garments.map((g) {
+                                    return _GarmentChip(
+                                      garmentType: g.garmentType,
+                                      attributes: g.attributes,
+                                    );
+                                  }).toList(),
+                                ),
+                              ),
+
+                            // Subtle inner glass border.
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(20),
+                                    border: Border.all(
+                                      color: Colors.white.withOpacity(0.08),
+                                      width: 1,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 4),
+
+                  // ── stats bar (glass panel) ──────────────────────────
+                  GlassContainer(
+                    margin: const EdgeInsets.symmetric(horizontal: 12),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    borderRadius: 16,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _StatTile(
+                          label: 'FPS',
+                          value:
+                              _serverStats['effective_fps']?.toString() ?? '—',
+                        ),
+                        _StatTile(
+                          label: 'KF',
+                          value:
+                              _serverStats['keyframes_detected']?.toString() ??
+                                  '0',
+                        ),
+                        _StatTile(
+                          label: 'Proc',
+                          value: _serverStats['avg_processing_ms'] != null
+                              ? '${_serverStats['avg_processing_ms']}ms'
+                              : '—',
+                        ),
+                        _StatTile(
+                          label: 'Sent',
+                          value: '${_relay.framesSent}',
+                        ),
+                        _StatTile(
+                          label: 'Photos',
+                          value: '$_photoCaptureCount',
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 4),
+
+                  // Latest detection summary.
                   if (_latestResult != null)
-                    Text(
-                      _latestResult!.garments.isEmpty
-                          ? 'No garments detected'
-                          : 'Detected: ${_latestResult!.garments.map((g) => g.garmentType).join(', ')}',
-                      style: const TextStyle(
-                        color: Color(0xFFE3DBD0),
-                        fontSize: 13,
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Text(
+                        _latestResult!.garments.isEmpty
+                            ? 'No garments detected'
+                            : 'Detected: ${_latestResult!.garments.map((g) => g.garmentType).join(', ')}',
+                        style: TextStyle(
+                          color: const Color(0xFFE3DBD0).withOpacity(0.7),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w300,
+                        ),
+                        textAlign: TextAlign.center,
                       ),
                     ),
 
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 6),
 
-                  // Control buttons.
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      _ControlButton(
-                        icon: _relayState == RelayState.connected
-                            ? Icons.stop_circle_outlined
-                            : Icons.play_circle_outline,
-                        label: _relayState == RelayState.connected
-                            ? 'Stop'
-                            : 'Start',
-                        onTap: () async {
-                          if (_relayState == RelayState.connected) {
-                            await _relay.disconnect();
-                          } else {
-                            _relay.resetCounters();
-                            await _relay.connect();
-                          }
-                        },
-                      ),
-                      const SizedBox(width: 24),
-                      _ControlButton(
-                        icon: Icons.camera_alt,
-                        label: 'Capture',
-                        onTap: () async {
-                          debugPrint('[Aesthetica] Manual capture button pressed');
-                          try {
-                            await _dat.capturePhoto();
-                            debugPrint('[Aesthetica] capturePhoto() called successfully');
-                          } catch (e) {
-                            debugPrint('[Aesthetica] capturePhoto() error: $e');
-                          }
-                        },
-                      ),
-                      const SizedBox(width: 24),
-                      _ControlButton(
-                        icon: _audioEnabled
-                            ? Icons.volume_up
-                            : Icons.volume_off,
-                        label: _audioEnabled ? 'Audio On' : 'Audio Off',
-                        onTap: () {
-                          setState(() => _audioEnabled = !_audioEnabled);
-                          if (!_audioEnabled) _tts.stop();
-                        },
-                      ),
-                      const SizedBox(width: 24),
-                      _ControlButton(
-                        icon: Icons.analytics_outlined,
-                        label: 'Stats',
-                        onTap: () => _relay.requestStats(),
-                      ),
-                    ],
+                  // ── control buttons (glass panel) ────────────────────
+                  GlassContainer(
+                    margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                    borderRadius: 24,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        GlassIconButton(
+                          icon: _relayState == RelayState.connected
+                              ? Icons.stop_circle_outlined
+                              : Icons.play_circle_outline,
+                          label: _relayState == RelayState.connected
+                              ? 'Stop'
+                              : 'Start',
+                          isActive: _relayState == RelayState.connected,
+                          activeColor: const Color(0xFF3CE37D),
+                          size: 42,
+                          onTap: () async {
+                            if (_relayState == RelayState.connected) {
+                              await _relay.disconnect();
+                            } else {
+                              _relay.resetCounters();
+                              await _relay.connect();
+                            }
+                          },
+                        ),
+                        GlassIconButton(
+                          icon: Icons.camera_alt,
+                          label: 'Capture',
+                          size: 42,
+                          onTap: () async {
+                            debugPrint(
+                                '[Aesthetica] Manual capture button pressed');
+                            try {
+                              await _dat.capturePhoto();
+                              debugPrint(
+                                  '[Aesthetica] capturePhoto() called successfully');
+                            } catch (e) {
+                              debugPrint(
+                                  '[Aesthetica] capturePhoto() error: $e');
+                            }
+                          },
+                        ),
+                        GlassIconButton(
+                          icon: _audioEnabled
+                              ? Icons.volume_up
+                              : Icons.volume_off,
+                          label:
+                              _audioEnabled ? 'Audio On' : 'Audio Off',
+                          isActive: _audioEnabled,
+                          activeColor: const Color(0xFF3CE37D),
+                          size: 42,
+                          onTap: () {
+                            setState(
+                                () => _audioEnabled = !_audioEnabled);
+                            if (!_audioEnabled) _tts.stop();
+                          },
+                        ),
+                        GlassIconButton(
+                          icon: _snapEnabled
+                              ? Icons.sensors
+                              : Icons.sensors_off,
+                          label:
+                              _snapEnabled ? 'Snap On' : 'Snap Off',
+                          isActive: _snapEnabled,
+                          activeColor: const Color(0xFF3CE37D),
+                          size: 42,
+                          onTap: () async {
+                            if (_snapEnabled) {
+                              debugPrint(
+                                  '[Aesthetica] User toggling snap OFF...');
+                              await _snapDetector.stop();
+                              setState(() => _snapEnabled = false);
+                              debugPrint(
+                                  '[Aesthetica] Snap detector stopped by user.');
+                            } else {
+                              debugPrint(
+                                  '[Aesthetica] User toggling snap ON...');
+                              try {
+                                await _snapDetector.start();
+                                setState(() => _snapEnabled = true);
+                                debugPrint(
+                                    '[Aesthetica] Snap detector restarted by user. '
+                                    'isRunning=${_snapDetector.isRunning}');
+                              } catch (e, stack) {
+                                debugPrint(
+                                    '[Aesthetica] Snap detector start error: $e');
+                                debugPrint('[Aesthetica] Stack: $stack');
+                              }
+                            }
+                          },
+                        ),
+                        GlassIconButton(
+                          icon: Icons.analytics_outlined,
+                          label: 'Stats',
+                          size: 42,
+                          onTap: () => _relay.requestStats(),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -527,28 +724,35 @@ class _GarmentChip extends StatelessWidget {
       _ => Icons.style,
     };
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1D2A2B).withOpacity(0.85),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFF3CE37D).withOpacity(0.4)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14, color: const Color(0xFF3CE37D)),
-          const SizedBox(width: 4),
-          Text(
-            garmentType.toUpperCase(),
-            style: const TextStyle(
-              color: Color(0xFFFAF7EF),
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.5,
-            ),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(20),
+            border:
+                Border.all(color: const Color(0xFF3CE37D).withOpacity(0.25)),
           ),
-        ],
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: const Color(0xFF3CE37D)),
+              const SizedBox(width: 4),
+              Text(
+                garmentType.toUpperCase(),
+                style: const TextStyle(
+                  color: Color(0xFFF0EDE5),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -567,54 +771,23 @@ class _StatTile extends StatelessWidget {
         Text(
           value,
           style: const TextStyle(
-            color: Color(0xFFFAF7EF),
-            fontSize: 16,
-            fontWeight: FontWeight.w700,
+            color: Color(0xFFF0EDE5),
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
             fontFamily: 'monospace',
           ),
         ),
         const SizedBox(height: 2),
         Text(
           label,
-          style: const TextStyle(
-            color: Color(0xFFAFA79A),
-            fontSize: 10,
+          style: TextStyle(
+            color: const Color(0xFFAFA79A).withOpacity(0.7),
+            fontSize: 9,
             fontWeight: FontWeight.w500,
+            letterSpacing: 0.3,
           ),
         ),
       ],
-    );
-  }
-}
-
-class _ControlButton extends StatelessWidget {
-  const _ControlButton({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Column(
-        children: [
-          Icon(icon, color: const Color(0xFFFAF7EF), size: 28),
-          const SizedBox(height: 4),
-          Text(
-            label,
-            style: const TextStyle(
-              color: Color(0xFFAFA79A),
-              fontSize: 11,
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

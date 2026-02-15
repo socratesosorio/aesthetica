@@ -10,8 +10,11 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_tts: ^4.2.5
+  flutter_voice_processor: ^1.1.2
   http: ^1.2.2
   image: ^4.2.0
+  path_provider: ^2.1.5
+  url_launcher: ^6.3.2
 
 dev_dependencies:
   flutter_test:

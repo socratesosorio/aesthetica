@@ -47,12 +47,15 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Aesthetica needs camera access to capture and preprocess style frames from your connected glasses stream.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Aesthetica uses the microphone on your Meta Ray-Ban glasses to detect finger snaps for hands-free photo capture.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Aesthetica uses Bluetooth to communicate with Meta Ray-Ban glasses through the DAT SDK.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Aesthetica uses Bluetooth to communicate with Meta Ray-Ban glasses through the DAT SDK.</string>
 	<key>UIBackgroundModes</key>
 	<array>
+		<string>audio</string>
 		<string>bluetooth-peripheral</string>
 		<string>external-accessory</string>
 	</array>

@@ -205,8 +205,127 @@ private final class DatFlutterBridge {
         Self.finish(result: result, completion)
       }
 
+    case "routeAudioToGlassesMic":
+      Self.routeAudioToBluetoothHFP(result: result)
+
+    case "playAudioFile":
+      guard let args = call.arguments as? [String: Any],
+            let path = args["path"] as? String else {
+        result(Self.flutterError(from: DatBridgeError.invalidArgs))
+        return
+      }
+      Self.playAudioFile(path: path, result: result)
+
+    case "stopAudioPlayback":
+      Self.stopAudioPlayback(result: result)
+
     default:
       result(FlutterMethodNotImplemented)
+    }
+  }
+
+  // ── Audio playback for debug recordings ───────────────────────────
+
+  private static var audioPlayer: AVAudioPlayer?
+
+  private static func playAudioFile(path: String, result: @escaping FlutterResult) {
+    NSLog("[Aesthetica][Audio] playAudioFile: \(path)")
+    do {
+      // Route output to speaker (not earpiece) so we can hear it.
+      let session = AVAudioSession.sharedInstance()
+      try session.setCategory(.playback, options: [.defaultToSpeaker])
+      try session.setActive(true)
+
+      let url = URL(fileURLWithPath: path)
+      let player = try AVAudioPlayer(contentsOf: url)
+      audioPlayer = player // retain
+      player.play()
+      NSLog("[Aesthetica][Audio] Playing \(url.lastPathComponent), duration=\(player.duration)s")
+      result(nil)
+    } catch {
+      NSLog("[Aesthetica][Audio] Play error: \(error)")
+      result(FlutterError(code: "playback_error", message: error.localizedDescription, details: nil))
+    }
+  }
+
+  private static func stopAudioPlayback(result: @escaping FlutterResult) {
+    audioPlayer?.stop()
+    audioPlayer = nil
+    result(nil)
+  }
+
+  /// Route audio input to the Ray-Ban glasses Bluetooth HFP microphone.
+  /// Falls back to the phone mic if no Bluetooth HFP input is found.
+  private static func routeAudioToBluetoothHFP(result: @escaping FlutterResult) {
+    NSLog("[Aesthetica][Audio] ── routeAudioToBluetoothHFP() called ──")
+    do {
+      let session = AVAudioSession.sharedInstance()
+
+      // Log current state before changes.
+      NSLog("[Aesthetica][Audio] Current category: \(session.category.rawValue)")
+      NSLog("[Aesthetica][Audio] Current route inputs: \(session.currentRoute.inputs.map { "\($0.portName) (\($0.portType.rawValue))" })")
+      NSLog("[Aesthetica][Audio] Current route outputs: \(session.currentRoute.outputs.map { "\($0.portName) (\($0.portType.rawValue))" })")
+
+      NSLog("[Aesthetica][Audio] Setting category to .playAndRecord with [.allowBluetooth, .defaultToSpeaker]...")
+      try session.setCategory(.playAndRecord, options: [.allowBluetooth, .defaultToSpeaker])
+      NSLog("[Aesthetica][Audio] Category set successfully.")
+
+      NSLog("[Aesthetica][Audio] Activating audio session...")
+      try session.setActive(true)
+      NSLog("[Aesthetica][Audio] Audio session activated.")
+
+      // Enumerate ALL available inputs for debugging.
+      let inputs = session.availableInputs ?? []
+      NSLog("[Aesthetica][Audio] Available inputs (\(inputs.count) total):")
+      for (i, input) in inputs.enumerated() {
+        NSLog("[Aesthetica][Audio]   [\(i)] portName=\"\(input.portName)\" "
+              + "portType=\(input.portType.rawValue) "
+              + "uid=\(input.uid) "
+              + "dataSources=\(input.dataSources?.count ?? 0)")
+        if let dataSources = input.dataSources {
+          for ds in dataSources {
+            NSLog("[Aesthetica][Audio]       dataSource: name=\"\(ds.dataSourceName)\" id=\(ds.dataSourceID) location=\(ds.location?.rawValue ?? "nil") orientation=\(ds.orientation?.rawValue ?? "nil")")
+          }
+        }
+      }
+
+      var routed = false
+      for input in inputs {
+        if input.portType == .bluetoothHFP {
+          NSLog("[Aesthetica][Audio] ★ Found Bluetooth HFP input: \(input.portName)")
+          try session.setPreferredInput(input)
+          NSLog("[Aesthetica][Audio] ✓ setPreferredInput succeeded for \(input.portName)")
+          routed = true
+          break
+        }
+      }
+
+      if !routed {
+        NSLog("[Aesthetica][Audio] ✗ No Bluetooth HFP input found. Port types seen: \(inputs.map { $0.portType.rawValue })")
+        NSLog("[Aesthetica][Audio] Will use default mic (likely phone built-in).")
+      }
+
+      // Log the final route after routing.
+      let finalRoute = session.currentRoute
+      NSLog("[Aesthetica][Audio] Final route inputs: \(finalRoute.inputs.map { "\($0.portName) (\($0.portType.rawValue))" })")
+      NSLog("[Aesthetica][Audio] Final route outputs: \(finalRoute.outputs.map { "\($0.portName) (\($0.portType.rawValue))" })")
+      NSLog("[Aesthetica][Audio] preferredInput: \(session.preferredInput?.portName ?? "nil")")
+      NSLog("[Aesthetica][Audio] inputGain: \(session.inputGain), isInputGainSettable: \(session.isInputGainSettable)")
+      NSLog("[Aesthetica][Audio] sampleRate: \(session.sampleRate), ioBufferDuration: \(session.ioBufferDuration)")
+
+      let currentInput = finalRoute.inputs.first
+      result([
+        "routed": routed,
+        "inputName": currentInput?.portName ?? "unknown",
+        "inputType": currentInput?.portType.rawValue ?? "unknown",
+        "sampleRate": session.sampleRate,
+        "ioBufferDuration": session.ioBufferDuration,
+        "availableInputCount": inputs.count,
+      ])
+    } catch {
+      NSLog("[Aesthetica][Audio] ✗ EXCEPTION during audio routing: \(error)")
+      NSLog("[Aesthetica][Audio] Error domain: \((error as NSError).domain), code: \((error as NSError).code)")
+      result(FlutterError(code: "audio_route_error", message: error.localizedDescription, details: "\(error)"))
     }
   }
 

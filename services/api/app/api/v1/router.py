@@ -9,6 +9,7 @@ from app.api.v1.endpoints import internal
 from app.api.v1.endpoints import media
 from app.api.v1.endpoints import products
 from app.api.v1.endpoints import profiles
+from app.api.v1.endpoints import stream
 
 api_router = APIRouter(prefix="/v1")
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])

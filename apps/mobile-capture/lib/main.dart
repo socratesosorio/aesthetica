@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'screens/capture_screen.dart';
 import 'screens/stream_screen.dart';
+import 'widgets/glass_container.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,7 +19,8 @@ class AestheticaCaptureApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF0D1414),
+        scaffoldBackgroundColor: const Color(0xFF060B0D),
+        fontFamily: '.SF Pro Text',
       ),
       home: const _ModeSelector(),
     );
@@ -33,94 +35,140 @@ class _ModeSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0D1414),
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  'Aesthetica',
-                  style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFFFAF7EF),
-                    letterSpacing: 1.2,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'Fashion capture for Meta Ray-Ban',
-                  style: TextStyle(color: Color(0xFFAFA79A), fontSize: 13),
-                ),
-                const SizedBox(height: 48),
-                _ModeCard(
-                  icon: Icons.camera_alt_outlined,
-                  title: 'Capture',
-                  subtitle: 'Single-shot capture via glasses button',
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) => const CaptureScreen()),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _ModeCard(
-                  icon: Icons.stream,
-                  title: 'Live Stream',
-                  subtitle: 'Real-time video stream with live analysis',
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) => const StreamScreen()),
-                  ),
-                ),
-              ],
+      backgroundColor: Colors.transparent,
+      body: AestheticaBackground(
+        child: Stack(
+          children: [
+            // Decorative glow orbs.
+            const GlowOrb(
+              color: Color(0xFF1A6B5C),
+              size: 320,
+              alignment: Alignment(-1.2, -0.8),
+              opacity: 0.10,
             ),
-          ),
+            const GlowOrb(
+              color: Color(0xFF1A3D6B),
+              size: 250,
+              alignment: Alignment(1.0, -0.3),
+              opacity: 0.08,
+            ),
+            const GlowOrb(
+              color: Color(0xFF6B4A1A),
+              size: 200,
+              alignment: Alignment(0.2, 1.2),
+              opacity: 0.06,
+            ),
+
+            // Content.
+            SafeArea(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Logo area.
+                      const Text(
+                        'AESTHETICA',
+                        style: TextStyle(
+                          fontSize: 32,
+                          fontWeight: FontWeight.w200,
+                          color: Color(0xFFF0EDE5),
+                          letterSpacing: 6.0,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Fashion capture for Meta Ray-Ban',
+                        style: TextStyle(
+                          color: const Color(0xFFAFA79A).withOpacity(0.7),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w300,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 56),
+
+                      // Mode cards.
+                      _GlassModeCard(
+                        icon: Icons.camera_alt_outlined,
+                        title: 'Capture',
+                        subtitle: 'Single-shot capture via snap gesture',
+                        accentColor: const Color(0xFFF5B342),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const CaptureScreen()),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      _GlassModeCard(
+                        icon: Icons.stream,
+                        title: 'Live Stream',
+                        subtitle: 'Real-time video stream with live analysis',
+                        accentColor: const Color(0xFF3CE37D),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const StreamScreen()),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 }
 
-class _ModeCard extends StatelessWidget {
-  const _ModeCard({
+class _GlassModeCard extends StatelessWidget {
+  const _GlassModeCard({
     required this.icon,
     required this.title,
     required this.subtitle,
     required this.onTap,
+    required this.accentColor,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
+  final Color accentColor;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        width: double.infinity,
+      child: GlassContainer(
         padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: const Color(0xFF141E1E),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFF2A3838)),
-        ),
+        borderRadius: 22,
         child: Row(
           children: [
+            // Icon with glow.
             Container(
-              width: 48,
-              height: 48,
+              width: 50,
+              height: 50,
               decoration: BoxDecoration(
-                color: const Color(0xFF1D2A2B),
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(14),
+                color: accentColor.withOpacity(0.12),
+                border: Border.all(
+                  color: accentColor.withOpacity(0.2),
+                  width: 1,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: accentColor.withOpacity(0.15),
+                    blurRadius: 16,
+                    spreadRadius: 2,
+                  ),
+                ],
               ),
-              child: Icon(icon, color: const Color(0xFFF5B342), size: 24),
+              child: Icon(icon, color: accentColor, size: 22),
             ),
             const SizedBox(width: 16),
             Expanded(
@@ -130,23 +178,28 @@ class _ModeCard extends StatelessWidget {
                   Text(
                     title,
                     style: const TextStyle(
-                      color: Color(0xFFFAF7EF),
+                      color: Color(0xFFF0EDE5),
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
+                      letterSpacing: 0.3,
                     ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     subtitle,
-                    style: const TextStyle(
-                      color: Color(0xFFAFA79A),
+                    style: TextStyle(
+                      color: const Color(0xFFAFA79A).withOpacity(0.7),
                       fontSize: 12,
+                      fontWeight: FontWeight.w300,
                     ),
                   ),
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right, color: Color(0xFFAFA79A)),
+            Icon(
+              Icons.chevron_right,
+              color: Colors.white.withOpacity(0.3),
+            ),
           ],
         ),
       ),
