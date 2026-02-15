@@ -96,6 +96,25 @@ def process_catalog_from_image(
         reco_ctx = _style_recommendation_prompt(current_style=style_signal, style_ctx=style_ctx, cfg=cfg)
         style_matches = _search_serp(reco_ctx["search_query"], cfg, max_results=max(10, top_k))
         style_ranked = _rank_style_matches(reco_ctx["search_query"], style_matches)[:top_k]
+
+        # 2. Prefer Lens → Shopping (using uploaded image); fallback to style recommendation.
+        lens_ctx: dict[str, Any] = {}
+        if req.image_path:
+            lens_ctx = _lens_to_shopping_context(req.image_path, cfg)
+        if lens_ctx.get("shopping"):
+            ranked = _rank_style_matches(
+                lens_ctx["description"], lens_ctx["shopping"]
+            )[:top_k]
+            search_query = lens_ctx["description"]
+            rationale = "Lens → Google Shopping"
+            logger.info("[CATALOG] Lens returned %d results, description=%s", len(ranked), (search_query or "")[:80])
+        else:
+            ranked = style_ranked
+            search_query = reco_ctx["search_query"]
+            rationale = reco_ctx.get("rationale") or "style recommendation"
+            logger.info("[CATALOG] Lens empty or no image_url — using style fallback, %d results", len(ranked))
+
+        # Catalog recommendations (app response): use ranked (Lens or style fallback).
         rows: list[CatalogRecommendation] = []
         for idx, m in enumerate(ranked, start=1):
             cat_row = CatalogRecommendation(
@@ -112,6 +131,11 @@ def process_catalog_from_image(
             )
             rows.append(cat_row)
             db.add(cat_row)
+
+        # Style recommendations: always use style_ranked (style-context recommendations).
+        style_query = reco_ctx["search_query"]
+        style_rationale = reco_ctx.get("rationale") or "style recommendation"
+        for idx, m in enumerate(style_ranked, start=1):
             db.add(
                 StyleRecommendation(
                     request_id=req.id,
@@ -121,10 +145,10 @@ def process_catalog_from_image(
                     source=_clip(m.get("source"), 255),
                     price_text=_clip(m.get("price_text"), 128),
                     price_value=m.get("price_value"),
-                    query_used=_clip(search_query, 2000),
+                    query_used=_clip(style_query, 2000),
                     recommendation_image_url=_clip(m.get("image_url"), 2048),
                     recommendation_image_bytes=_download_image_bytes(m.get("image_url"), cfg.rec_image_timeout_sec),
-                    rationale=_clip(rationale, 4000),
+                    rationale=_clip(style_rationale, 4000),
                 )
             )
         req.pipeline_status = "ok" if rows else "no_products_found"
@@ -140,7 +164,7 @@ def process_catalog_from_image(
             "results=%d, query='%s', source=%s",
             req.id, req.pipeline_status, req.garment_name, req.brand_hint,
             req.confidence, len(rows), search_query,
-            "lens" if lens_matches else "style_fallback",
+            "lens" if lens_ctx.get("shopping") else "style_fallback",
         )
         for r in rows:
             logger.info("[CATALOG]   #%d: %s | %s | %s", r.rank, r.title[:80], r.price_text, r.source)
@@ -189,6 +213,8 @@ def _notify_poke(
 
         product_url = None
         image_url = None
+        top_match = ""
+        lens_top = ranked[0] if ranked else None
         if lens_top:
             top_match = f"Top match: {lens_top.get('title', '')}"
             if lens_top.get("price_text"):
