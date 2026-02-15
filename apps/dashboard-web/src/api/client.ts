@@ -1,7 +1,7 @@
 import { authStore } from "../lib/auth";
 import type { Capture, Profile, RadarPoint, User } from "../types/api";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = authStore.getToken();
@@ -13,7 +13,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  const url = API_BASE ? `${API_BASE}${path}` : path;
+  const response = await fetch(url, { ...init, headers });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `HTTP ${response.status}`);
@@ -54,6 +55,7 @@ export const api = {
   mediaUrl(path: string): string {
     const token = authStore.getToken();
     const encoded = encodeURIComponent(path);
-    return `${API_BASE}/v1/media?path=${encoded}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+    const base = API_BASE ? `${API_BASE}/v1/media` : "/v1/media";
+    return `${base}?path=${encoded}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
   },
 };

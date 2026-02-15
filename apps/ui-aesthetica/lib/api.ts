@@ -55,6 +55,12 @@ export type ApiCatalogRequestOut = {
   pipeline_status: string
   garment_name?: string | null
   brand_hint?: string | null
+  prompt?: string | null
+  prompt_text?: string | null
+  query_used?: string | null
+  request_text?: string | null
+  notes?: string | null
+  metadata?: Record<string, unknown> | null
   confidence?: number | null
   error?: string | null
 }
@@ -112,7 +118,7 @@ export type ApiProductRecommendationOut = {
   score?: number | null
 }
 
-const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000').replace(/\/+$/, '')
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? '').trim().replace(/\/+$/, '')
 const DEV_EMAIL = process.env.NEXT_PUBLIC_DEV_AUTH_EMAIL || ''
 const DEV_PASSWORD = process.env.NEXT_PUBLIC_DEV_AUTH_PASSWORD || ''
 
@@ -164,7 +170,8 @@ async function apiFetch<T>(
     signal?: AbortSignal
   } = {},
 ): Promise<T> {
-  const url = `${API_BASE_URL}${path.startsWith('/') ? '' : '/'}${path}`
+  const normalizedPath = `${path.startsWith('/') ? '' : '/'}${path}`
+  const url = API_BASE_URL ? `${API_BASE_URL}${normalizedPath}` : normalizedPath
   const res = await fetch(url, {
     method: opts.method ?? (opts.json ? 'POST' : 'GET'),
     headers: {
@@ -205,10 +212,9 @@ export async function ensureDevToken(signal?: AbortSignal): Promise<string | nul
 }
 
 export function mediaUrl(path: string, token: string) {
-  const u = new URL(`${API_BASE_URL}/v1/media`)
-  u.searchParams.set('path', path)
-  u.searchParams.set('token', token)
-  return u.toString()
+  const base = API_BASE_URL ? `${API_BASE_URL}/v1/media` : '/v1/media'
+  const qs = new URLSearchParams({ path, token }).toString()
+  return `${base}?${qs}`
 }
 
 export const api = {
@@ -257,4 +263,3 @@ export const api = {
       signal,
     }),
 }
-
