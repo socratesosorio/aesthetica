@@ -47,11 +47,16 @@ mcp = FastMCP("Aesthetica - AI Fashion Intelligence")
 
 STYLE_AXES = ["casual", "minimal", "structured", "classic", "neutral"]
 CACHE_TTL_SECONDS = int(os.getenv("POKE_MCP_CACHE_TTL_SECONDS", "60"))
+SERP_RATE_LIMIT_COOLDOWN_SECONDS = int(os.getenv("POKE_MCP_SERP_RATE_LIMIT_COOLDOWN_SECONDS", "120"))
 
 SEARCH_CACHE: TTLCache[list[dict[str, Any]]] = TTLCache(ttl_seconds=CACHE_TTL_SECONDS, max_entries=512)
 STYLE_PROMPT_CACHE: TTLCache[dict[str, str]] = TTLCache(ttl_seconds=CACHE_TTL_SECONDS, max_entries=256)
 OUTFIT_PLAN_CACHE: TTLCache[dict[str, Any]] = TTLCache(ttl_seconds=CACHE_TTL_SECONDS, max_entries=128)
 ANALYZE_CACHE: TTLCache[dict[str, Any]] = TTLCache(ttl_seconds=CACHE_TTL_SECONDS, max_entries=128)
+SERP_RATE_LIMIT_CACHE: TTLCache[bool] = TTLCache(
+    ttl_seconds=SERP_RATE_LIMIT_COOLDOWN_SECONDS,
+    max_entries=256,
+)
 
 HTTP_CLIENT = httpx.Client(timeout=15.0, follow_redirects=True)
 
@@ -109,14 +114,51 @@ def _get_demo_user_id() -> str | None:
     return DEMO_USER_ID
 
 
-def _cached_serp_search(query: str, cfg: CatalogConfig, max_results: int) -> tuple[list[dict[str, Any]], bool]:
+def _is_serp_rate_limited(exc: Exception) -> bool:
+    if isinstance(exc, requests.HTTPError):
+        resp = getattr(exc, "response", None)
+        return bool(resp is not None and resp.status_code == 429)
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429
+    return False
+
+
+def _cached_serp_search(
+    query: str,
+    cfg: CatalogConfig,
+    max_results: int,
+) -> tuple[list[dict[str, Any]], bool, bool]:
     clean_query = " ".join(query.strip().split())
     key = _hash_payload({"kind": "serp", "query": clean_query.lower(), "max_results": max_results})
+    global_rl_key = "serp_global_rate_limited"
+    query_rl_key = _hash_payload({"kind": "serp_rl", "query": clean_query.lower()})
+
+    cached = SEARCH_CACHE.get(key)
+    if cached is not None:
+        return cached, True, False
+
+    if SERP_RATE_LIMIT_CACHE.get(global_rl_key) or SERP_RATE_LIMIT_CACHE.get(query_rl_key):
+        logger.warning("serp_search_skipped_rate_limited query=%s", clean_query)
+        return [], False, True
 
     def _factory() -> list[dict[str, Any]]:
         return _search_serp(clean_query, cfg, max_results=max_results)
 
-    return SEARCH_CACHE.get_or_set(key, _factory)
+    try:
+        value, cache_hit = SEARCH_CACHE.get_or_set(key, _factory)
+        return value, cache_hit, False
+    except Exception as exc:
+        if _is_serp_rate_limited(exc):
+            logger.warning(
+                "serp_search_rate_limited cooldown_s=%s query=%s",
+                SERP_RATE_LIMIT_COOLDOWN_SECONDS,
+                clean_query,
+            )
+            SERP_RATE_LIMIT_CACHE.set(global_rl_key, True)
+            SERP_RATE_LIMIT_CACHE.set(query_rl_key, True)
+            SEARCH_CACHE.set(key, [])
+            return [], False, True
+        raise
 
 
 def _cached_style_prompt(style_ctx: dict[str, Any], cfg: CatalogConfig, category_hint: str) -> tuple[dict[str, str], bool]:
@@ -269,7 +311,11 @@ def _persist_analysis(
             rationale = clip_text(reco_ctx.get("rationale"), 360)
             search_query = clip_text(reco_ctx.get("search_query"), 240)
 
-            web_results, _ = _cached_serp_search(search_query, cfg=cfg, max_results=max(5, max_products))
+            web_results, _, web_rate_limited = _cached_serp_search(
+                search_query,
+                cfg=cfg,
+                max_results=max(5, max_products),
+            )
             for idx, item in enumerate(web_results[:max_products], start=1):
                 title = clip_text(item.get("title"), 1024)
                 url = clip_text(item.get("product_url"), 2048)
@@ -330,6 +376,7 @@ def _persist_analysis(
             "products": recommendations,
             "search_query": search_query or None,
             "rationale": rationale or None,
+            "web_rate_limited": bool(include_products and web_rate_limited),
             "mode": mode,
             "persisted": True,
         }
@@ -512,10 +559,11 @@ def find_similar_products(
             used_web = True
             t_web = now_ms()
             cfg = CatalogConfig()
-            serp_items, cache_hit = _cached_serp_search(clean_query, cfg, max_results=limit_norm)
+            serp_items, cache_hit, web_rate_limited = _cached_serp_search(clean_query, cfg, max_results=limit_norm)
             web_hits = [_serialize_serp_item(item, i) for i, item in enumerate(serp_items[:limit_norm], start=1)]
             timings["web"] = elapsed_ms(t_web)
             timings["web_cache_hit"] = 1 if cache_hit else 0
+            timings["web_rate_limited"] = 1 if web_rate_limited else 0
         except Exception:
             logger.exception("find_similar_products_web_failed")
 
@@ -762,9 +810,14 @@ def get_style_recommendations(
 
         products: list[dict[str, Any]] = []
         search_cache_hit = False
+        web_rate_limited = False
         if include_web:
             t_web = now_ms()
-            web_results, search_cache_hit = _cached_serp_search(search_query, cfg, max_results=limit_norm)
+            web_results, search_cache_hit, web_rate_limited = _cached_serp_search(
+                search_query,
+                cfg,
+                max_results=limit_norm,
+            )
             products = [_serialize_serp_item(item, i) for i, item in enumerate(web_results[:limit_norm], start=1)]
             timings["web"] = elapsed_ms(t_web)
 
@@ -772,6 +825,7 @@ def get_style_recommendations(
         profile = {axis: round(float(avg.get(axis, 50.0)), 2) for axis in STYLE_AXES}
 
         timings["web_cache_hit"] = 1 if search_cache_hit else 0
+        timings["web_rate_limited"] = 1 if web_rate_limited else 0
         timings["total"] = elapsed_ms(t0)
         return ok_response(
             intent,
@@ -780,6 +834,7 @@ def get_style_recommendations(
                 "search_query": clip_text(search_query, 220),
                 "rationale": clip_text(reco_ctx.get("rationale"), 220),
                 "recommendations": products,
+                "web_rate_limited": web_rate_limited,
             },
             timing_ms=timings,
             next_actions=[{"tool": "search_clothes", "reason": "Run additional targeted shopping query."}],
@@ -909,13 +964,20 @@ def search_clothes(query: str, category: str = "top", max_results: int = 5) -> d
     limit_norm = clamp_int(max_results, 1, 10)
 
     try:
+        global_rl_key = "serp_global_rate_limited"
+        use_searcher = os.getenv("POKE_MCP_USE_WEB_SEARCHER", "false").strip().lower() in {"1", "true", "yes", "on"}
         t_search = now_ms()
-        searcher = SerpApiWebProductSearcher()
-        attributes = {"query_text": clean_query}
-        results = searcher.search(category=category_norm, attributes=attributes, limit=limit_norm)
+        results = []
+        if use_searcher and not SERP_RATE_LIMIT_CACHE.get(global_rl_key):
+            searcher = SerpApiWebProductSearcher()
+            attributes = {"query_text": clean_query}
+            results = searcher.search(category=category_norm, attributes=attributes, limit=limit_norm)
+        else:
+            timings["searcher_skipped"] = 1
         timings["search"] = elapsed_ms(t_search)
 
         payload: list[dict[str, Any]] = []
+        web_rate_limited = False
         if results:
             for i, cand in enumerate(results[:limit_norm], start=1):
                 payload.append(
@@ -931,9 +993,14 @@ def search_clothes(query: str, category: str = "top", max_results: int = 5) -> d
                 )
         else:
             cfg = CatalogConfig()
-            serp_items, cache_hit = _cached_serp_search(clean_query, cfg, max_results=limit_norm)
+            serp_items, cache_hit, web_rate_limited = _cached_serp_search(
+                clean_query,
+                cfg,
+                max_results=limit_norm,
+            )
             payload = [_serialize_serp_item(item, i) for i, item in enumerate(serp_items[:limit_norm], start=1)]
             timings["fallback_cache_hit"] = 1 if cache_hit else 0
+            timings["web_rate_limited"] = 1 if web_rate_limited else 0
 
         timings["total"] = elapsed_ms(t0)
         return ok_response(
@@ -942,6 +1009,7 @@ def search_clothes(query: str, category: str = "top", max_results: int = 5) -> d
                 "query": clean_query,
                 "category": category_norm,
                 "results": payload,
+                "web_rate_limited": web_rate_limited,
             },
             timing_ms=timings,
         )
@@ -998,12 +1066,23 @@ def build_outfit(
             if budget:
                 query_text = clip_text(f"{query_text} {budget}", 220)
 
-            web_results, cache_hit = _cached_serp_search(query_text, cfg, max_results=max(limit_norm, 2))
+            web_results, cache_hit, piece_rate_limited = _cached_serp_search(
+                query_text,
+                cfg,
+                max_results=max(limit_norm, 2),
+            )
             if cache_hit:
                 search_cache_hits += 1
 
             options = [_serialize_serp_item(item, i) for i, item in enumerate(web_results[:limit_norm], start=1)]
-            piece_results.append({"role": role, "query": query_text, "options": options})
+            piece_results.append(
+                {
+                    "role": role,
+                    "query": query_text,
+                    "options": options,
+                    "web_rate_limited": piece_rate_limited,
+                }
+            )
 
         avg = style_ctx.get("avg", {})
         profile = {axis: round(float(avg.get(axis, 50.0)), 2) for axis in STYLE_AXES}
