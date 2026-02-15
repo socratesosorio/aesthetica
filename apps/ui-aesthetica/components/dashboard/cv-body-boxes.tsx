@@ -9,6 +9,15 @@ export type RegionLabel = {
   label: string
 }
 
+export type RegionProductHint = {
+  title: string
+  brand?: string | null
+  priceLabel?: string | null
+  href?: string | null
+}
+
+export type RegionHints = Partial<Record<RegionId, RegionProductHint>>
+
 type Box = {
   id: RegionId
   x: number
@@ -23,23 +32,44 @@ function clamp(n: number, min: number, max: number) {
 
 async function loadImage(src: string) {
   const img = new Image()
+  img.crossOrigin = 'anonymous'
+  img.referrerPolicy = 'no-referrer'
   img.src = src
-  await img.decode()
+  // `decode()` isn't supported everywhere and can reject for non-fatal reasons.
+  // Fall back to `onload` so we still run CV.
+  if (typeof img.decode === 'function') {
+    try {
+      await img.decode()
+      return img
+    } catch {
+      // fall through to onload/onerror
+    }
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onLoad = () => {
+      cleanup()
+      resolve()
+    }
+    const onError = () => {
+      cleanup()
+      reject(new Error('Failed to load image.'))
+    }
+    const cleanup = () => {
+      img.removeEventListener('load', onLoad)
+      img.removeEventListener('error', onError)
+    }
+    img.addEventListener('load', onLoad)
+    img.addEventListener('error', onError)
+  })
   return img
 }
 
-function drawContain(
-  ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
-  w: number,
-  h: number,
-) {
-  const s = Math.min(w / img.naturalWidth, h / img.naturalHeight)
-  const dw = img.naturalWidth * s
-  const dh = img.naturalHeight * s
+function containRect(imgW: number, imgH: number, w: number, h: number) {
+  const s = Math.min(w / imgW, h / imgH)
+  const dw = imgW * s
+  const dh = imgH * s
   const dx = (w - dw) / 2
   const dy = (h - dh) / 2
-  ctx.drawImage(img, dx, dy, dw, dh)
   return { dx, dy, dw, dh, scale: s }
 }
 
@@ -96,16 +126,21 @@ function expandBox(
 export function CvBodyBoxes({
   src,
   regions,
+  regionHints,
+  orderedLabels,
   className,
 }: {
   src: string
   regions: RegionLabel[]
+  regionHints?: RegionHints
+  orderedLabels?: readonly [string, string, string]
   className?: string
 }) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
+  const [hovered, setHovered] = React.useState<RegionId | null>(null)
   const [state, setState] = React.useState<
     | { status: 'idle' | 'loading' | 'processing' }
-    | { status: 'ready'; boxes: Box[] }
+    | { status: 'ready'; boxes: Box[]; draw: { dx: number; dy: number; dw: number; dh: number } }
     | { status: 'error'; message: string }
   >({ status: 'idle' })
 
@@ -124,9 +159,13 @@ export function CvBodyBoxes({
 
         if (cancelled) return
 
+        // Turbopack + some deps can surface CJS/ESM interop differences.
+        // Normalize so both `mod.load` and `mod.default.load` work.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const bodyPixAny = (bodyPix as any)?.default ?? bodyPix
         // Ensure a backend is set (webgl when available).
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const tfAny = tf as any
+        const tfAny = (tf as any)?.default ?? (tf as any)
         if (tfAny?.getBackend?.() !== 'webgl') {
           try {
             await tfAny.setBackend?.('webgl')
@@ -136,7 +175,7 @@ export function CvBodyBoxes({
           }
         }
 
-        const net = await bodyPix.load({
+        const net = await bodyPixAny.load({
           architecture: 'MobileNetV1',
           outputStride: 16,
           multiplier: 0.75,
@@ -237,7 +276,11 @@ export function CvBodyBoxes({
           }))
 
         if (cancelled) return
-        setState({ status: 'ready', boxes: rawBoxes })
+        // Canvas dims are fixed; we compute the exact draw rect so overlays align.
+        const canvasW = 840
+        const canvasH = 980
+        const draw = containRect(img.naturalWidth, img.naturalHeight, canvasW, canvasH)
+        setState({ status: 'ready', boxes: rawBoxes, draw })
 
         // Draw.
         const canvas = canvasRef.current
@@ -248,7 +291,8 @@ export function CvBodyBoxes({
         const w = canvas.width
         const h = canvas.height
         ctx.clearRect(0, 0, w, h)
-        const { dx, dy, dw, dh } = drawContain(ctx, img, w, h)
+        const { dx, dy, dw, dh } = containRect(img.naturalWidth, img.naturalHeight, w, h)
+        ctx.drawImage(img, dx, dy, dw, dh)
 
         // Overlay.
         ctx.save()
@@ -295,6 +339,83 @@ export function CvBodyBoxes({
           className="h-full w-full"
         />
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/10 via-transparent to-transparent" />
+
+        {state.status === 'ready' ? (
+          <div className="absolute inset-0">
+            {(() => {
+              // Force labels by vertical order (top-most -> Top, etc).
+              const ordered = [...state.boxes].sort((a, b) => a.y - b.y)
+              const keys: RegionId[] = ['top', 'bottom', 'shoes']
+              const labels = orderedLabels ?? (['Top', 'Bottom', 'Shoes'] as const)
+              const canvasW = 840
+              const canvasH = 980
+
+              return ordered.map((b, idx) => {
+                const k = keys[idx] ?? b.id
+                const label = labels[idx] ?? regions.find((r) => r.id === k)?.label ?? k
+                const hint = regionHints?.[k]
+
+                const leftPct = ((state.draw.dx + b.x * state.draw.dw) / canvasW) * 100
+                const topPct = ((state.draw.dy + b.y * state.draw.dh) / canvasH) * 100
+                const wPct = ((b.w * state.draw.dw) / canvasW) * 100
+                const hPct = ((b.h * state.draw.dh) / canvasH) * 100
+
+                return (
+                  <div
+                    key={`${k}_${idx}`}
+                    className="absolute"
+                    style={{ left: `${leftPct}%`, top: `${topPct}%`, width: `${wPct}%`, height: `${hPct}%` }}
+                  >
+                    <div
+                      className={[
+                        'group relative h-full w-full rounded-md',
+                        'transition-[transform,box-shadow,background-color] duration-200',
+                        'hover:bg-black/5 hover:shadow-[0_0_0_2px_rgba(57,255,20,0.9),0_0_24px_rgba(57,255,20,0.25)]',
+                      ].join(' ')}
+                      onMouseEnter={() => setHovered(k)}
+                      onMouseLeave={() => setHovered((cur) => (cur === k ? null : cur))}
+                      onClick={() => {
+                        if (hint?.href) window.open(hint.href, '_blank', 'noopener,noreferrer')
+                      }}
+                      role={hint?.href ? 'link' : undefined}
+                      tabIndex={hint?.href ? 0 : -1}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && hint?.href) window.open(hint.href, '_blank', 'noopener,noreferrer')
+                      }}
+                    >
+                      <div className="pointer-events-none absolute left-2 top-2 rounded-full bg-black/55 px-2 py-1 text-[11px] font-medium text-white backdrop-blur">
+                        {label}
+                      </div>
+
+                      {hint && hovered === k ? (
+                        <div className="absolute -right-2 top-2 z-10 w-[240px] translate-x-full">
+                          <div className="rounded-2xl border border-border bg-background/95 p-3 shadow-xl backdrop-blur">
+                            <div className="text-xs font-semibold">{hint.title}</div>
+                            <div className="mt-0.5 text-xs text-muted-foreground">
+                              {[hint.brand, hint.priceLabel].filter(Boolean).join(' · ') || 'Best match'}
+                            </div>
+                            {hint.href ? (
+                              <a
+                                href={hint.href}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="mt-2 inline-flex items-center rounded-full border border-border bg-muted px-3 py-1 text-xs font-medium transition-colors hover:bg-muted/70"
+                              >
+                                Open product
+                              </a>
+                            ) : (
+                              <div className="mt-2 text-xs text-muted-foreground">No product link available</div>
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                )
+              })
+            })()}
+          </div>
+        ) : null}
 
         {state.status !== 'ready' ? (
           <div className="absolute inset-0 grid place-items-center bg-background/40 backdrop-blur-[2px]">

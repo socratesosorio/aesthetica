@@ -22,8 +22,30 @@ export type ApiCaptureOut = {
 
 export type ApiUserProfileOut = {
   user_id: string
+  user_embedding_meta: Record<string, unknown>
   radar_vector: Record<string, number>
+  brand_stats: Record<string, number>
+  color_stats: Record<string, number>
+  category_bias: Record<string, number>
   updated_at: string | null
+}
+
+export type ApiRadarHistoryPoint = {
+  id: string
+  created_at: string
+  radar_vector: Record<string, number>
+}
+
+export type ApiCatalogRecommendationOut = {
+  rank: number
+  title: string
+  product_url: string
+  source?: string | null
+  price_text?: string | null
+  price_value?: number | null
+  query_used?: string | null
+  recommendation_image_url?: string | null
+  has_recommendation_image_bytes: boolean
 }
 
 export type ApiProductSearchOut = {
@@ -149,6 +171,13 @@ export const api = {
     }),
   userProfile: (userId: string, token: string, signal?: AbortSignal) =>
     apiFetch<ApiUserProfileOut>(`/v1/users/${encodeURIComponent(userId)}/profile`, { token, signal }),
+  radarHistory: (userId: string, token: string, days = 30, signal?: AbortSignal) =>
+    apiFetch<ApiRadarHistoryPoint[]>(
+      `/v1/users/${encodeURIComponent(userId)}/radar/history?days=${days}`,
+      { token, signal },
+    ),
+  catalogRecommendations: (token: string, limit = 24, signal?: AbortSignal) =>
+    apiFetch<ApiCatalogRecommendationOut[]>(`/v1/catalog/recommendations?limit=${limit}`, { token, signal }),
   productSearchByCapture: (
     captureId: string,
     garmentType: string,

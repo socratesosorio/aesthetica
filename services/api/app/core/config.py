@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,7 +11,8 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
-    database_url: str = "postgresql+psycopg://postgres:postgres@postgres:5432/aesthetica"
+    database_url: str = Field(default="postgresql+psycopg://postgres:postgres@postgres:5432/aesthetica")
+    supabase_database_url: str | None = None
     redis_url: str = "redis://redis:6379/0"
 
     secret_key: str = "change-me"
@@ -33,6 +35,14 @@ class Settings(BaseSettings):
 
     dev_auth_email: str = "demo@aesthetica.dev"
     dev_auth_password: str = "demo123"
+
+    @model_validator(mode="after")
+    def _apply_supabase_db_override(self) -> "Settings":
+        # Allow `SUPABASE_DATABASE_URL` to override `DATABASE_URL` when provided.
+        # Treat empty string as "not set".
+        if self.supabase_database_url:
+            self.database_url = self.supabase_database_url
+        return self
 
 
 settings = Settings()
