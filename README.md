@@ -195,7 +195,8 @@ This script runs a real image through:
 1. `POST /v1/catalog/from-image`
 2. Supabase capture upload URL check
 3. Serp Google Lens on that uploaded image
-4. Serp Google Shopping using the normalized Lens description
+4. OpenAI `gpt-5.2` refinement (image + Lens normalized text) to remove non-clothing terms
+5. Serp Google Shopping using the refined clothing-only description
 
 Run from repo root:
 
@@ -217,5 +218,7 @@ make test-lens-shopping LENS_TEST_IMAGE=apps/ui-aesthetica/public/images/outfit-
 The script prints:
 - `request_id`
 - `capture_blob_url` + HTTP status
-- `normalized_description` (Lens-derived query)
+- `base_description` (raw Lens-normalized text)
+- `refined_description` (OpenAI 5.2 cleaned clothing-only text)
+- `normalized_description` (final query used for shopping)
 - top Shopping results used by the Lens -> Shopping path

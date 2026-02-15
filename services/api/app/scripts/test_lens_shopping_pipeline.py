@@ -85,8 +85,12 @@ def main() -> int:
     cfg = CatalogConfig()
     ctx = _lens_to_shopping_context(image_url, cfg)
     desc = ctx.get("description")
+    base_desc = ctx.get("base_description")
+    refined_desc = ctx.get("refined_description")
     shopping = ctx.get("shopping") or []
     print("\nLens -> Shopping context:")
+    print(f"base_description: {base_desc}")
+    print(f"refined_description: {refined_desc}")
     print(f"normalized_description: {desc}")
     print(f"shopping_count: {len(shopping)}")
     for idx, row in enumerate(shopping[:5], start=1):
