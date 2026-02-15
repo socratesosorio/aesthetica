@@ -10,12 +10,14 @@ logger = logging.getLogger(__name__)
 
 
 class PokeNotifier:
-    def send(self, message: str) -> None:
+    def send(self, message: str, image_url: str | None = None) -> None:
         if not settings.poke_api_key:
             logger.warning("poke_key_missing_skip_send")
             return
         headers = {"Authorization": f"Bearer {settings.poke_api_key}", "Content-Type": "application/json"}
-        payload = {"message": message[:800]}
+        payload: dict[str, object] = {"message": message[:800]}
+        if image_url:
+            payload["image_url"] = image_url
         try:
             resp = httpx.post(settings.poke_webhook_url, headers=headers, json=payload, timeout=10)
             resp.raise_for_status()

@@ -7,12 +7,17 @@ import os
 import re
 from typing import Any
 
+import logging
+
 import requests
 from PIL import Image
 from sqlalchemy.orm import Session
 
 from app.models import CatalogRecommendation, CatalogRequest
 from app.schemas.catalog import CatalogFromImageResponse, CatalogRecommendationOut
+from app.services.notifier import PokeNotifier
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -72,6 +77,7 @@ def process_catalog_from_image(
             rows.append(row)
         db.commit()
         db.refresh(req)
+        _notify_poke(signal, ranked)
         return _to_response(req, rows)
     except Exception as exc:
         req.pipeline_status = "pipeline_error"
@@ -79,6 +85,86 @@ def process_catalog_from_image(
         db.commit()
         db.refresh(req)
         return _to_response(req, [])
+
+
+def _notify_poke(signal: dict[str, Any], ranked: list[dict[str, Any]]) -> None:
+    """Send a vibey AI-generated message to Poke about what the user just captured."""
+    try:
+        garment = signal.get("garment_name") or "fit"
+        brand = signal.get("brand_hint")
+        color = signal.get("color_hint")
+        tags = signal.get("style_tags", [])
+
+        # Build context for OpenAI
+        details = f"garment: {garment}"
+        if brand:
+            details += f", brand: {brand}"
+        if color:
+            details += f", color: {color}"
+        if tags:
+            details += f", style: {', '.join(tags[:3])}"
+
+        top_match = ""
+        image_url = None
+        if ranked:
+            top = ranked[0]
+            title = top.get("title", "")
+            price = top.get("price_text")
+            image_url = top.get("image_url")
+            top_match = f"Top match: {title}"
+            if price:
+                top_match += f" ({price})"
+            if len(ranked) > 1:
+                top_match += f"\n+ {len(ranked) - 1} more options saved"
+
+        opener = _generate_poke_opener(details)
+
+        msg = opener
+        if top_match:
+            msg += f"\n\n{top_match}"
+
+        PokeNotifier().send(msg, image_url=image_url)
+    except Exception:
+        logger.exception("poke_notify_failed")
+
+
+def _generate_poke_opener(garment_details: str) -> str:
+    """Use OpenAI to generate a chill, vibey one-liner about the spotted garment."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return f"just spotted something fire — {garment_details}"
+
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a fashion-savvy AI texting a friend about a clothing item they just "
+                            "spotted and saved. Write a single short message (1-2 sentences max, under 150 chars). "
+                            "Be chill, vibey, gen-z energy. Lowercase. No hashtags. No emojis. "
+                            "Sound like a cool friend hyping them up, not a brand. Vary your style every time."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"The user just captured this item: {garment_details}",
+                    },
+                ],
+                "temperature": 1.0,
+                "max_tokens": 80,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        logger.warning("openai_poke_opener_failed, using fallback")
+        return f"just spotted something fire — {garment_details}"
 
 
 def _analyze_image_openai(image_bytes: bytes, cfg: CatalogConfig) -> dict[str, Any]:
